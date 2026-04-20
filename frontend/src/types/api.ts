@@ -1,4 +1,5 @@
 export type DiffKind = 'insert' | 'delete' | 'replace' | 'reflow';
+export type ConfidenceLevel = 'high' | 'low';
 
 export interface HighlightFragment {
   page: number;
@@ -23,6 +24,7 @@ export interface DiffAnchor {
   id: string;
   kind: DiffKind;
   source_type: 'text' | 'table';
+  confidence: ConfidenceLevel;
   excerpt_left: string;
   excerpt_right: string;
   left_fragments: HighlightFragment[];

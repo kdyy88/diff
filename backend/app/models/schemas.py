@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 JobState = Literal["uploaded", "extracting", "aligning", "projecting", "done", "failed"]
 DiffKind = Literal["insert", "delete", "replace", "reflow"]
 SourceType = Literal["text", "table"]
+ConfidenceLevel = Literal["high", "low"]
 
 
 class HighlightFragment(BaseModel):
@@ -33,6 +34,7 @@ class DiffAnchor(BaseModel):
     id: str
     kind: DiffKind
     source_type: SourceType = "text"
+    confidence: ConfidenceLevel = "high"
     excerpt_left: str = ""
     excerpt_right: str = ""
     left_fragments: list[HighlightFragment] = Field(default_factory=list)

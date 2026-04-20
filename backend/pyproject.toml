@@ -7,14 +7,14 @@ name = "pdf-flow-diff-backend"
 version = "0.1.0"
 description = "FastAPI backend for non-linear PDF diff visualization"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "GPL-2.0-only" }
 requires-python = ">=3.11"
 keywords = ["pdf", "diff", "fastapi", "pymupdf", "review", "document-comparison"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Framework :: FastAPI",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: GNU General Public License v2 (GPLv2)",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
@@ -28,6 +28,7 @@ dependencies = [
   "python-multipart>=0.0.20,<1.0.0",
   "pymupdf>=1.26.0,<2.0.0",
   "diff-match-patch>=20241021",
+  "patiencediff>=0.2.18,<0.3.0",
   "pydantic>=2.11.0,<3.0.0",
 ]
 

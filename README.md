@@ -2,7 +2,7 @@
 
 `PDF Flow Diff` is a local web MVP for reviewing long-form PDF revisions when pagination reflow makes page-by-page comparison unusable.
 
-It is designed for workflows where a tiny text change matters, but a single inserted sentence can push the next 100 pages into different physical positions. The project collapses both PDFs into a continuous logical text flow, computes diffs with `diff-match-patch`, then projects review anchors back onto the original PDF coordinates for side-by-side visual review.
+It is designed for workflows where a tiny text change matters, but a single inserted sentence can push the next 100 pages into different physical positions. The project reconstructs a continuous logical text flow, coarse-aligns extracted lines with `patiencediff`, refines only changed windows with `diff-match-patch`, then projects review anchors back onto the original PDF coordinates for side-by-side visual review.
 
 ## What it solves
 
@@ -35,10 +35,11 @@ The core pipeline is:
 
 1. Extract page geometry, text atoms, and table regions from each PDF with `PyMuPDF`.
 2. Reconstruct a cross-page logical text flow and normalize only what is needed for alignment.
-3. Run `diff-match-patch` on the normalized 1D streams.
-4. Coalesce raw edit events into review-friendly anchors.
-5. Project anchor ranges back to PDF page coordinates.
-6. Render side-by-side PDFs with anchor-linked highlights in the React UI.
+3. Coarse-align extracted text lines with `patiencediff` so hard `equal` windows can re-anchor the flow.
+4. Run local `diff-match-patch` only inside non-equal windows for word and character precision.
+5. Coalesce raw edit events into review-friendly anchors and mark risky large windows as low confidence.
+6. Project anchor ranges back to PDF page coordinates.
+7. Render side-by-side PDFs with anchor-linked highlights in the React UI.
 
 See [docs/architecture.md](docs/architecture.md) for the full module breakdown.
 
@@ -54,7 +55,7 @@ See [docs/architecture.md](docs/architecture.md) for the full module breakdown.
 
 ## Tech stack
 
-- Backend: FastAPI, PyMuPDF, diff-match-patch, Pydantic
+- Backend: FastAPI, PyMuPDF, patiencediff, diff-match-patch, Pydantic
 - Frontend: React, Vite, TypeScript, Tailwind, react-pdf
 - Tooling: `uv` for Python dependency management, `pnpm` for frontend dependency management
 
@@ -114,6 +115,11 @@ Primary source types:
 - `text`
 - `table`
 
+Anchor confidence values:
+
+- `high`
+- `low`
+
 Full request and response examples live in [docs/api.md](docs/api.md), and backend integration guidance lives in [docs/backend-integration.md](docs/backend-integration.md).
 
 ## Local development
@@ -140,14 +146,21 @@ If a table cannot be matched reliably, the system intentionally falls back to a 
 
 ## Design choices
 
-- The project does use Google's open-source `diff-match-patch`; it does not reimplement the core text diff algorithm.
+- The project does use mature open-source diff libraries; it does not reimplement the core text diff algorithms.
 - Custom logic focuses on:
   - text flow reconstruction across pages
+  - line-level coarse anchoring with `patiencediff`
+  - windowed local refinement with `diff-match-patch`
   - minimal normalization before alignment
   - review-anchor coalescing
+  - low-confidence marking for risky large replace windows
   - reflow detection
   - coordinate projection
   - explicit-grid table extraction
+
+## License
+
+This repository is released under `GPL-2.0-only` to stay compatible with the current `patiencediff` coarse-alignment dependency used by the backend. See [LICENSE](LICENSE).
 
 ## Documentation index
 

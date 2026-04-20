@@ -8,7 +8,8 @@ This document explains how the current MVP turns two PDFs into review-ready diff
 PDF A / PDF B
     -> extraction
     -> normalization
-    -> text diff
+    -> line-anchor coarse alignment
+    -> local fine diff
     -> review-anchor coalescing
     -> coordinate projection
     -> API result
@@ -32,6 +33,7 @@ Important outputs:
 - `DocumentProjection.pages`
 - `DocumentProjection.chars`
 - `DocumentProjection.words`
+- `DocumentProjection.text_segments`
 - `DocumentProjection.tables`
 - `DocumentProjection.raw_text`
 - `DocumentProjection.normalized_text`
@@ -50,7 +52,8 @@ The design goal is to normalize only what helps alignment without hiding the tru
 
 Responsibilities:
 
-- run `diff-match-patch` on normalized text
+- coarse-align extracted text lines with `patiencediff`
+- run local `diff-match-patch` windows only inside non-equal coarse ranges
 - merge raw low-level edits into review-friendly anchors
 - suppress layout-only noise through optional `reflow` anchors
 - compare explicit-grid table content independently from paragraph text
@@ -58,7 +61,9 @@ Responsibilities:
 Important design choices:
 
 - text anchors are review-oriented, not raw diff opcodes
+- `equal` coarse windows act as hard re-anchoring points
 - nearby insert/delete events may become one `replace`
+- large risky text windows are still returned but marked `confidence="low"`
 - table anchors and text anchors are not merged together
 
 ### `app/services/projector.py`
@@ -111,14 +116,21 @@ Current stage progression:
 
 - display normalized review anchors as clickable cards
 
-## Why `diff-match-patch` is still central
+## Why the diff stack is split
 
-The project does not try to write a new general-purpose diff engine. The core diff algorithm comes from `diff-match-patch`. The value of this codebase is the surrounding document-specific machinery:
+The project does not try to write a new general-purpose diff engine. Instead it combines two mature libraries:
+
+- `patiencediff` provides stable line-level coarse anchoring so repeated clauses do not drift across dozens of later pages after one early mismatch.
+- `diff-match-patch` provides the local word and character precision needed for numbers, abbreviations, units, and short clause edits.
+
+The value of this codebase is the surrounding document-specific machinery:
 
 - 2D PDF extraction
 - 1D logical text reconstruction
+- line segmentation for coarse anchors
 - table separation
 - review-anchor normalization
+- low-confidence marking instead of silent suppression
 - 2D projection
 - review UI behavior
 

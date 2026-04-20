@@ -13,7 +13,7 @@ Treat the backend as an asynchronous document comparison service:
 
 The backend is intentionally opinionated:
 
-- text diffing uses `diff-match-patch`
+- body-text diffing uses `patiencediff` for coarse line anchoring and `diff-match-patch` for local refinement
 - output is normalized for human review
 - the main unit of work is the `DiffAnchor`, not the raw diff opcode
 
@@ -37,7 +37,7 @@ Practical polling rule:
 
 ### 1. Cross-page logical alignment
 
-The backend does not compare PDFs page-by-page. It reconstructs a single logical text stream across the whole document so that pagination shifts do not become wall-to-wall false diffs.
+The backend does not compare PDFs page-by-page. It reconstructs a logical text flow across the whole document, coarse-aligns extracted lines first, then refines only local change windows so pagination shifts do not become wall-to-wall false diffs.
 
 ### 2. Character-aware replacement tracking
 
@@ -59,6 +59,7 @@ The backend intentionally merges nearby low-level edits into a smaller number of
 
 - `kind`: `insert | delete | replace | reflow`
 - `source_type`: `text | table`
+- `confidence`: `high | low`
 - `left_fragments` / `right_fragments`: PDF highlight boxes
 - `excerpt_left` / `excerpt_right`: short review excerpts
 - `raw_event_count`: number of merged low-level edits
@@ -71,6 +72,8 @@ Text anchors additionally expose:
 - `right_range`
 
 These ranges refer to the backend's internal logical character stream. They are useful for debugging or for advanced integrations, but most UIs can ignore them and render only fragments plus excerpts.
+
+`confidence="low"` is a warning, not a filter. Low-confidence anchors still appear in the default result because this project favors recall over silently hiding uncertain edits.
 
 ### Table anchors
 

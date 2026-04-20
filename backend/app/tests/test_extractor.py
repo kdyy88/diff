@@ -4,6 +4,8 @@ import tempfile
 import fitz
 
 from app.services.extractor import extract_document
+from app.services.extractor import _clean_cell_text
+from app.services.extractor import _should_keep_extracted_char
 from app.services.normalizer import normalize_char
 
 
@@ -57,3 +59,14 @@ def test_extract_document_splits_out_explicit_grid_tables() -> None:
     assert projection.tables[0].col_count == 3
     assert "outside" in projection.raw_text
     assert "A1" not in projection.raw_text
+
+
+def test_clean_cell_text_handles_none() -> None:
+    assert _clean_cell_text(None) == ""
+    assert _clean_cell_text("  Amount  ") == "Amount"
+
+
+def test_should_keep_extracted_char_filters_control_chars() -> None:
+    assert _should_keep_extracted_char("A")
+    assert _should_keep_extracted_char(" ")
+    assert not _should_keep_extracted_char("\x01")

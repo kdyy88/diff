@@ -4,7 +4,26 @@ import tempfile
 import fitz
 
 from app.services.differ import compare_documents
-from app.services.extractor import CharAtom, DocumentProjection, PageInfo, WordAtom
+from app.services.extractor import CharAtom, DocumentProjection, PageInfo, TextSegment, WordAtom
+
+
+def _collapsed_mapping(text: str) -> tuple[str, list[int]]:
+    aligned_chars = []
+    aligned_to_raw = []
+    previous_was_space = False
+    for index, char in enumerate(text):
+        normalized = " " if char.isspace() else char
+        if normalized.isspace():
+            if previous_was_space:
+                continue
+            aligned_chars.append(" ")
+            aligned_to_raw.append(index)
+            previous_was_space = True
+            continue
+        aligned_chars.append(normalized)
+        aligned_to_raw.append(index)
+        previous_was_space = False
+    return "".join(aligned_chars), aligned_to_raw
 
 
 def _build_document(text: str, *, page: int = 0, y: float = 100.0) -> DocumentProjection:
@@ -68,8 +87,226 @@ def _build_document(text: str, *, page: int = 0, y: float = 100.0) -> DocumentPr
         chars=chars,
         words=words,
         tables=[],
+        text_segments=[
+            TextSegment(
+                id="segment-0",
+                page=page,
+                block=0,
+                line=0,
+                bbox=(20.0, y, current_x, y + 12.0),
+                raw_text=text,
+                aligned_text=" ".join(text.split()),
+                raw_start=0,
+                raw_end=len(chars),
+            )
+        ],
         raw_text=text,
         normalized_text=text,
+        aligned_text=" ".join(text.split()),
+        aligned_to_raw=[index for index, char in enumerate(text) if (not char.isspace()) or (index == 0 or not text[index - 1].isspace())],
+    )
+
+
+def _build_character_document(text: str, *, page: int = 0, y: float = 100.0) -> DocumentProjection:
+    chars = []
+    current_x = 20.0
+    for index, char in enumerate(text):
+        bbox = None if char.isspace() else (current_x, y, current_x + 8.0, y + 12.0)
+        chars.append(
+            CharAtom(
+                id=f"c-{index}",
+                char=char,
+                norm_char=" " if char.isspace() else char,
+                page=page,
+                bbox=bbox,
+                block=0,
+                line=0,
+                word=None,
+                stream_index=index,
+                synthetic=char.isspace(),
+            )
+        )
+        current_x += 8.0
+    return DocumentProjection(
+        pdf_path=None,  # type: ignore[arg-type]
+        pages=[PageInfo(page=page, width=600.0, height=800.0)],
+        chars=chars,
+        words=[],
+        tables=[],
+        text_segments=[
+            TextSegment(
+                id="segment-0",
+                page=page,
+                block=0,
+                line=0,
+                bbox=(20.0, y, current_x, y + 12.0),
+                raw_text=text,
+                aligned_text=" ".join(text.split()),
+                raw_start=0,
+                raw_end=len(chars),
+            )
+        ],
+        raw_text=text,
+        normalized_text="".join(" " if char.isspace() else char for char in text),
+        aligned_text=" ".join(text.split()),
+        aligned_to_raw=[index for index, char in enumerate(text) if (not char.isspace()) or (index == 0 or not text[index - 1].isspace())],
+    )
+
+
+def _build_wrapped_document(lines: list[str], *, page: int = 0, y: float = 100.0) -> DocumentProjection:
+    chars = []
+    current_y = y
+    raw_parts: list[str] = []
+    text_segments: list[TextSegment] = []
+    for line_index, line in enumerate(lines):
+        current_x = 20.0
+        segment_start = len(chars)
+        for char in line:
+            stream_index = len(chars)
+            chars.append(
+                CharAtom(
+                    id=f"c-{stream_index}",
+                    char=char,
+                    norm_char=" " if char.isspace() else char,
+                    page=page,
+                    bbox=None if char.isspace() else (current_x, current_y, current_x + 8.0, current_y + 12.0),
+                    block=0,
+                    line=line_index,
+                    word=None,
+                    stream_index=stream_index,
+                    synthetic=False,
+                )
+            )
+            current_x += 8.0
+            raw_parts.append(char)
+
+        segment_end = len(chars)
+        segment_aligned_text, _ = _collapsed_mapping(line)
+        text_segments.append(
+            TextSegment(
+                id=f"segment-{line_index}",
+                page=page,
+                block=0,
+                line=line_index,
+                bbox=(20.0, current_y, current_x, current_y + 12.0),
+                raw_text=line,
+                aligned_text=segment_aligned_text,
+                raw_start=segment_start,
+                raw_end=segment_end,
+            )
+        )
+
+        if line_index < len(lines) - 1:
+            stream_index = len(chars)
+            chars.append(
+                CharAtom(
+                    id=f"c-{stream_index}",
+                    char="\n",
+                    norm_char=" ",
+                    page=page,
+                    bbox=None,
+                    block=0,
+                    line=line_index,
+                    word=None,
+                    stream_index=stream_index,
+                    synthetic=True,
+                )
+            )
+            raw_parts.append("\n")
+            current_y += 16.0
+
+    aligned_chars = []
+    aligned_to_raw = []
+    previous_was_space = False
+    for raw_index, char in enumerate(chars):
+        if char.synthetic and char.char.isspace():
+            continue
+        normalized = char.norm_char or char.char
+        if normalized.isspace():
+            if previous_was_space:
+                continue
+            aligned_chars.append(" ")
+            aligned_to_raw.append(raw_index)
+            previous_was_space = True
+        else:
+            aligned_chars.append(normalized)
+            aligned_to_raw.append(raw_index)
+            previous_was_space = False
+
+    return DocumentProjection(
+        pdf_path=None,  # type: ignore[arg-type]
+        pages=[PageInfo(page=page, width=600.0, height=800.0)],
+        chars=chars,
+        words=[],
+        tables=[],
+        text_segments=text_segments,
+        raw_text="".join(raw_parts),
+        normalized_text="".join(char.norm_char for char in chars),
+        aligned_text="".join(aligned_chars),
+        aligned_to_raw=aligned_to_raw,
+    )
+
+
+def _build_real_space_document(text: str, *, page: int = 0, y: float = 100.0) -> DocumentProjection:
+    chars = []
+    current_x = 20.0
+    for index, char in enumerate(text):
+        bbox = None if char.isspace() else (current_x, y, current_x + 8.0, y + 12.0)
+        chars.append(
+            CharAtom(
+                id=f"c-{index}",
+                char=char,
+                norm_char=" " if char.isspace() else char,
+                page=page,
+                bbox=bbox,
+                block=0,
+                line=0,
+                word=None,
+                stream_index=index,
+                synthetic=False,
+            )
+        )
+        current_x += 8.0
+
+    aligned_chars = []
+    aligned_to_raw = []
+    previous_was_space = False
+    for raw_index, char in enumerate(chars):
+        normalized = char.norm_char or char.char
+        if normalized.isspace():
+            if previous_was_space:
+                continue
+            aligned_chars.append(" ")
+            aligned_to_raw.append(raw_index)
+            previous_was_space = True
+        else:
+            aligned_chars.append(normalized)
+            aligned_to_raw.append(raw_index)
+            previous_was_space = False
+
+    return DocumentProjection(
+        pdf_path=None,  # type: ignore[arg-type]
+        pages=[PageInfo(page=page, width=600.0, height=800.0)],
+        chars=chars,
+        words=[],
+        tables=[],
+        text_segments=[
+            TextSegment(
+                id="segment-0",
+                page=page,
+                block=0,
+                line=0,
+                bbox=(20.0, y, current_x, y + 12.0),
+                raw_text=text,
+                aligned_text="".join(aligned_chars),
+                raw_start=0,
+                raw_end=len(chars),
+            )
+        ],
+        raw_text=text,
+        normalized_text="".join(char.norm_char for char in chars),
+        aligned_text="".join(aligned_chars),
+        aligned_to_raw=aligned_to_raw,
     )
 
 
@@ -139,6 +376,61 @@ def test_compare_documents_does_not_merge_across_strong_boundaries() -> None:
     assert len(replace_anchors) >= 2
 
 
+def test_compare_documents_ignores_whitespace_only_changes() -> None:
+    left = _build_character_document("因出租人或自如原因影响承租人居住安全。")
+    right = _build_character_document("因出租人或自如原因影响承租人 居住安全。")
+
+    result = compare_documents(left, right, include_reflow=False)
+
+    assert result.summary.insertions == 0
+    assert result.summary.deletions == 0
+    assert result.summary.replacements == 0
+    assert result.anchors == []
+
+
+def test_compare_documents_ignores_synthetic_line_wrap_differences() -> None:
+    left = _build_wrapped_document(["如本合同为续约合同，支付时间不受本条款限制，以合同内的具体约", "定为准"])
+    right = _build_wrapped_document(["如本合同为续约合同，支付时间不受本条款限制，以合同内的具体约定为", "准"])
+
+    result = compare_documents(left, right, include_reflow=False)
+
+    assert result.summary.insertions == 0
+    assert result.summary.deletions == 0
+    assert result.summary.replacements == 0
+    assert result.anchors == []
+
+
+def test_compare_documents_preserves_real_space_differences() -> None:
+    left = _build_real_space_document("A B")
+    right = _build_real_space_document("AB")
+
+    result = compare_documents(left, right, include_reflow=False)
+
+    assert result.summary.insertions + result.summary.deletions + result.summary.replacements > 0
+    assert result.anchors
+
+
+def test_compare_documents_reanchors_after_inserted_lines() -> None:
+    left = _build_wrapped_document(["A", "B", "C", "Tail stable"])
+    right = _build_wrapped_document(["A", "Inserted one", "Inserted two", "B", "C", "Tail stable"])
+
+    result = compare_documents(left, right, include_reflow=False)
+
+    assert all("Tail stable" not in anchor.excerpt_left for anchor in result.anchors)
+    assert all("Tail stable" not in anchor.excerpt_right for anchor in result.anchors)
+
+
+def test_compare_documents_marks_large_replace_windows_low_confidence() -> None:
+    left = _build_wrapped_document(["Prefix", "L1", "L2", "L3", "L4", "L5", "Suffix"])
+    right = _build_wrapped_document(["Prefix", "R1", "R2", "R3", "R4", "R5", "Suffix"])
+
+    result = compare_documents(left, right, include_reflow=False)
+    text_anchors = [anchor for anchor in result.anchors if anchor.source_type == "text"]
+
+    assert text_anchors
+    assert all(anchor.confidence == "low" for anchor in text_anchors)
+
+
 def test_compare_documents_emits_table_cell_anchor() -> None:
     left_path = Path(tempfile.gettempdir()) / "table-left.pdf"
     right_path = Path(tempfile.gettempdir()) / "table-right.pdf"
@@ -172,6 +464,7 @@ def test_compare_documents_emits_table_cell_anchor() -> None:
 
     assert len(table_anchors) == 1
     assert table_anchors[0].kind == "replace"
+    assert table_anchors[0].confidence == "high"
     assert table_anchors[0].table_context is not None
     assert table_anchors[0].table_context.col_label == "Amount"
     assert "11,147.19" in table_anchors[0].excerpt_right

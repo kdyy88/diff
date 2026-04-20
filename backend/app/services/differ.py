@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from difflib import SequenceMatcher
+from difflib import SequenceMatcher as DiffLibSequenceMatcher
 import re
 
 from diff_match_patch import diff_match_patch
+from patiencediff import PatienceSequenceMatcher
 
 from app.core.config import REFLOW_MIN_CHARS, REFLOW_MIN_DELTA_Y
 from app.models.schemas import DiffAnchor, DiffResult, DiffSummary, PageMeta, TableContext
-from app.services.extractor import CharAtom, DocumentProjection, TableCell, TableRegion
+from app.services.extractor import CharAtom, DocumentProjection, TableCell, TableRegion, TextSegment
 from app.services.projector import project_bbox, project_range
 
 
@@ -30,6 +31,15 @@ class _ReviewAnchorCandidate:
     raw_event_count: int = 1
 
 
+@dataclass(slots=True)
+class _TextWindow:
+    raw_start: int
+    raw_end: int
+    aligned_text: str
+    aligned_to_raw: list[int]
+    segment_count: int
+
+
 def _is_token_char(char: str) -> bool:
     return bool(char and not char.isspace())
 
@@ -39,6 +49,116 @@ def _text_for_range(document: DocumentProjection, char_range: tuple[int | None, 
     if start is None or end is None or start >= end:
         return ""
     return document.raw_text[start:end]
+
+
+def _build_aligned_window(
+    document: DocumentProjection,
+    raw_start: int,
+    raw_end: int,
+) -> tuple[str, list[int]]:
+    aligned_chars: list[str] = []
+    aligned_to_raw: list[int] = []
+    previous_was_space = False
+
+    for raw_index in range(raw_start, raw_end):
+        char = document.chars[raw_index]
+        if char.synthetic and char.char.isspace():
+            continue
+
+        normalized = char.norm_char or char.char
+        if not normalized:
+            continue
+        if normalized.isspace():
+            if previous_was_space:
+                continue
+            aligned_chars.append(" ")
+            aligned_to_raw.append(raw_index)
+            previous_was_space = True
+            continue
+
+        aligned_chars.append(normalized)
+        aligned_to_raw.append(raw_index)
+        previous_was_space = False
+
+    return "".join(aligned_chars), aligned_to_raw
+
+
+def _segment_window_bounds(
+    segments: list[TextSegment],
+    start: int,
+    end: int,
+) -> tuple[int, int]:
+    if start < end:
+        return segments[start].raw_start, segments[end - 1].raw_end
+    if start < len(segments):
+        position = segments[start].raw_start
+        return position, position
+    if segments:
+        position = segments[-1].raw_end
+        return position, position
+    return 0, 0
+
+
+def _build_text_window(
+    document: DocumentProjection,
+    segments: list[TextSegment],
+    start: int,
+    end: int,
+) -> _TextWindow:
+    raw_start, raw_end = _segment_window_bounds(segments, start, end)
+    aligned_text, aligned_to_raw = _build_aligned_window(document, raw_start, raw_end)
+    return _TextWindow(
+        raw_start=raw_start,
+        raw_end=raw_end,
+        aligned_text=aligned_text,
+        aligned_to_raw=aligned_to_raw,
+        segment_count=max(end - start, 0),
+    )
+
+
+def _window_aligned_range_to_raw_range(
+    window: _TextWindow,
+    start: int,
+    end: int,
+) -> tuple[int, int]:
+    if not window.aligned_to_raw:
+        return window.raw_start, window.raw_start
+
+    raw_start = window.aligned_to_raw[start] if start < len(window.aligned_to_raw) else window.raw_end
+    if end <= start:
+        return raw_start, raw_start
+    raw_end = window.aligned_to_raw[end - 1] + 1 if end - 1 < len(window.aligned_to_raw) else window.raw_end
+    return raw_start, raw_end
+
+
+def _semantic_text_for_range(
+    document: DocumentProjection,
+    start: int | None,
+    end: int | None,
+) -> str:
+    if start is None or end is None or start >= end:
+        return ""
+
+    parts: list[str] = []
+    previous_was_space = False
+    for char in document.chars[start:end]:
+        if char.synthetic and char.char.isspace():
+            continue
+
+        normalized = char.norm_char or char.char
+        if not normalized:
+            continue
+        if normalized.isspace():
+            if previous_was_space:
+                continue
+            parts.append(" ")
+            previous_was_space = True
+            continue
+
+        parts.append(normalized)
+        previous_was_space = False
+
+    return "".join(parts).strip()
 
 
 def _is_strong_boundary(document: DocumentProjection, index: int) -> bool:
@@ -65,21 +185,27 @@ def _expand_phrase_range(
     document: DocumentProjection,
     start: int | None,
     end: int | None,
+    *,
+    min_index: int = 0,
+    max_index: int | None = None,
 ) -> tuple[int, int] | None:
     if start is None or end is None:
         return None
 
+    if max_index is None:
+        max_index = len(document.chars)
+
     left = start
     right = end
     if left == right:
-        if left > 0 and _is_token_char(document.chars[left - 1].char):
+        if left > min_index and _is_token_char(document.chars[left - 1].char):
             left -= 1
-        elif right < len(document.chars) and _is_token_char(document.chars[right].char):
+        elif right < max_index and _is_token_char(document.chars[right].char):
             right += 1
         else:
             return None
 
-    while left > 0:
+    while left > min_index:
         previous_char = document.chars[left - 1].char
         if _is_strong_boundary(document, left - 1):
             break
@@ -88,7 +214,7 @@ def _expand_phrase_range(
             continue
         break
 
-    while right < len(document.chars):
+    while right < max_index:
         current_char = document.chars[right].char
         if _is_strong_boundary(document, right):
             break
@@ -115,12 +241,17 @@ def _promote_single_side_edit_to_replace(
     end_a: int,
     start_b: int,
     end_b: int,
+    *,
+    min_a: int = 0,
+    max_a: int | None = None,
+    min_b: int = 0,
+    max_b: int | None = None,
 ) -> tuple[str, int | None, int | None, int | None, int | None]:
     if kind not in {"insert", "delete"}:
         return kind, start_a, end_a, start_b, end_b
 
-    range_a = _expand_phrase_range(document_a, start_a, end_a)
-    range_b = _expand_phrase_range(document_b, start_b, end_b)
+    range_a = _expand_phrase_range(document_a, start_a, end_a, min_index=min_a, max_index=max_a)
+    range_b = _expand_phrase_range(document_b, start_b, end_b, min_index=min_b, max_index=max_b)
     if not range_a or not range_b:
         return kind, start_a, end_a, start_b, end_b
 
@@ -132,6 +263,49 @@ def _promote_single_side_edit_to_replace(
         return kind, start_a, end_a, start_b, end_b
 
     return "replace", range_a[0], range_a[1], range_b[0], range_b[1]
+
+
+def _is_semantic_noop_candidate(
+    kind: str,
+    document_a: DocumentProjection,
+    document_b: DocumentProjection,
+    start_a: int,
+    end_a: int,
+    start_b: int,
+    end_b: int,
+    *,
+    min_a: int = 0,
+    max_a: int | None = None,
+    min_b: int = 0,
+    max_b: int | None = None,
+) -> bool:
+    semantic_a = _semantic_text_for_range(document_a, start_a, end_a)
+    semantic_b = _semantic_text_for_range(document_b, start_b, end_b)
+
+    if semantic_a == semantic_b:
+        return True
+    if kind == "replace":
+        return False
+
+    expanded_a = _expand_phrase_range(document_a, start_a, end_a, min_index=min_a, max_index=max_a)
+    expanded_b = _expand_phrase_range(document_b, start_b, end_b, min_index=min_b, max_index=max_b)
+    if not expanded_a or not expanded_b:
+        return False
+
+    expanded_text_a = _semantic_text_for_range(document_a, expanded_a[0], expanded_a[1])
+    expanded_text_b = _semantic_text_for_range(document_b, expanded_b[0], expanded_b[1])
+    return bool(expanded_text_a) and expanded_text_a == expanded_text_b
+
+
+def _is_semantic_noop_review_candidate(
+    candidate: _ReviewAnchorCandidate,
+    *,
+    document_a: DocumentProjection,
+    document_b: DocumentProjection,
+) -> bool:
+    semantic_a = _semantic_text_for_range(document_a, candidate.start_a, candidate.end_a)
+    semantic_b = _semantic_text_for_range(document_b, candidate.start_b, candidate.end_b)
+    return bool(semantic_a or semantic_b) and semantic_a == semantic_b
 
 
 def _merge_diff_ops(raw_diffs: list[tuple[int, str]]) -> list[tuple[str, str, str]]:
@@ -314,6 +488,7 @@ def _anchor_from_candidate(
     document_a: DocumentProjection,
     document_b: DocumentProjection,
     index: int,
+    confidence: str = "high",
 ) -> DiffAnchor:
     left_projection = project_range(document_a, candidate.start_a, candidate.end_a)
     right_projection = project_range(document_b, candidate.start_b, candidate.end_b)
@@ -329,6 +504,7 @@ def _anchor_from_candidate(
         id=f"anchor-text-{index}",
         kind=candidate.kind,
         source_type="text",
+        confidence=confidence,
         excerpt_left=excerpt_left,
         excerpt_right=excerpt_right,
         left_fragments=left_projection.fragments,
@@ -448,6 +624,7 @@ def _build_table_cell_anchor(
         id=anchor_id,
         kind=kind,
         source_type="table",
+        confidence="high",
         excerpt_left=_table_excerpt(left_cell, left_text),
         excerpt_right=_table_excerpt(right_cell, right_text),
         left_fragments=left_fragments,
@@ -492,6 +669,7 @@ def _build_table_structure_anchor(
         id=anchor_id,
         kind=kind,
         source_type="table",
+        confidence="high",
         excerpt_left=label_left,
         excerpt_right=label_right,
         left_fragments=left_fragments,
@@ -508,6 +686,138 @@ def _build_table_structure_anchor(
             col_label=None,
         ) if context_table else None,
     )
+
+
+def _build_reflow_anchor(
+    *,
+    document_a: DocumentProjection,
+    document_b: DocumentProjection,
+    start_a: int,
+    end_a: int,
+    start_b: int,
+    end_b: int,
+    index: int,
+) -> DiffAnchor:
+    left_projection = project_range(document_a, start_a, end_a)
+    right_projection = project_range(document_b, start_b, end_b)
+    return DiffAnchor(
+        id=f"reflow-{index}",
+        kind="reflow",
+        source_type="text",
+        confidence="high",
+        excerpt_left=_slice_excerpt(left_projection.excerpt or _text_for_range(document_a, (start_a, end_a))),
+        excerpt_right=_slice_excerpt(right_projection.excerpt or _text_for_range(document_b, (start_b, end_b))),
+        left_fragments=left_projection.fragments,
+        right_fragments=right_projection.fragments,
+        left_range=left_projection.char_range,
+        right_range=right_projection.char_range,
+        raw_event_count=1,
+        group_key=f"reflow-{index}",
+        table_context=None,
+    )
+
+
+def _compare_text_window(
+    document_a: DocumentProjection,
+    document_b: DocumentProjection,
+    *,
+    window_a: _TextWindow,
+    window_b: _TextWindow,
+    confidence: str,
+    anchor_index_start: int,
+) -> list[DiffAnchor]:
+    if not window_a.aligned_text and not window_b.aligned_text:
+        return []
+
+    dmp = diff_match_patch()
+    diffs = dmp.diff_main(window_a.aligned_text, window_b.aligned_text, checklines=False)
+    dmp.diff_cleanupSemantic(diffs)
+    merged_ops = _merge_diff_ops(diffs)
+
+    cursor_a = 0
+    cursor_b = 0
+    raw_candidates: list[_ReviewAnchorCandidate] = []
+
+    for kind, text_a, text_b in merged_ops:
+        len_a = len(text_a)
+        len_b = len(text_b)
+        aligned_start_a = cursor_a
+        aligned_start_b = cursor_b
+        aligned_end_a = cursor_a + len_a
+        aligned_end_b = cursor_b + len_b
+        start_a, end_a = _window_aligned_range_to_raw_range(window_a, aligned_start_a, aligned_end_a)
+        start_b, end_b = _window_aligned_range_to_raw_range(window_b, aligned_start_b, aligned_end_b)
+
+        if kind != "equal":
+            resolved_kind, resolved_start_a, resolved_end_a, resolved_start_b, resolved_end_b = (
+                _promote_single_side_edit_to_replace(
+                    kind,
+                    document_a,
+                    document_b,
+                    start_a,
+                    end_a,
+                    start_b,
+                    end_b,
+                    min_a=window_a.raw_start,
+                    max_a=window_a.raw_end,
+                    min_b=window_b.raw_start,
+                    max_b=window_b.raw_end,
+                )
+            )
+            if _is_semantic_noop_candidate(
+                resolved_kind,
+                document_a,
+                document_b,
+                resolved_start_a,
+                resolved_end_a,
+                resolved_start_b,
+                resolved_end_b,
+                min_a=window_a.raw_start,
+                max_a=window_a.raw_end,
+                min_b=window_b.raw_start,
+                max_b=window_b.raw_end,
+            ):
+                cursor_a = aligned_end_a
+                cursor_b = aligned_end_b
+                continue
+
+            raw_candidates.append(
+                _ReviewAnchorCandidate(
+                    kind=resolved_kind,
+                    start_a=resolved_start_a if resolved_start_a != resolved_end_a else None,
+                    end_a=resolved_end_a if resolved_start_a != resolved_end_a else None,
+                    start_b=resolved_start_b if resolved_start_b != resolved_end_b else None,
+                    end_b=resolved_end_b if resolved_start_b != resolved_end_b else None,
+                )
+            )
+
+        cursor_a = aligned_end_a
+        cursor_b = aligned_end_b
+
+    review_candidates = coalesce_review_anchors(
+        raw_candidates,
+        document_a=document_a,
+        document_b=document_b,
+    )
+    review_candidates = [
+        candidate
+        for candidate in review_candidates
+        if not _is_semantic_noop_review_candidate(
+            candidate,
+            document_a=document_a,
+            document_b=document_b,
+        )
+    ]
+    return [
+        _anchor_from_candidate(
+            candidate,
+            document_a=document_a,
+            document_b=document_b,
+            index=anchor_index_start + index,
+            confidence=confidence,
+        )
+        for index, candidate in enumerate(review_candidates)
+    ]
 
 
 def _compare_tables(
@@ -561,7 +871,7 @@ def _compare_tables(
         right_rows = _table_rows(right_table)
         left_signatures = [_row_signature(row) for row in left_rows]
         right_signatures = [_row_signature(row) for row in right_rows]
-        matcher = SequenceMatcher(a=left_signatures, b=right_signatures, autojunk=False)
+        matcher = DiffLibSequenceMatcher(a=left_signatures, b=right_signatures, autojunk=False)
 
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
             if tag == "equal":
@@ -627,88 +937,65 @@ def compare_documents(
     *,
     include_reflow: bool = False,
 ) -> DiffResult:
-    dmp = diff_match_patch()
-    diffs = dmp.diff_main(document_a.normalized_text, document_b.normalized_text, checklines=False)
-    dmp.diff_cleanupSemantic(diffs)
-    merged_ops = _merge_diff_ops(diffs)
+    left_segments = document_a.text_segments
+    right_segments = document_b.text_segments
+    matcher = PatienceSequenceMatcher(
+        None,
+        [segment.aligned_text for segment in left_segments],
+        [segment.aligned_text for segment in right_segments],
+    )
 
-    cursor_a = 0
-    cursor_b = 0
-    raw_candidates: list[_ReviewAnchorCandidate] = []
+    text_anchors: list[DiffAnchor] = []
     reflow_anchors: list[DiffAnchor] = []
     summary = DiffSummary(
         pages_a=len(document_a.pages),
         pages_b=len(document_b.pages),
     )
 
-    for op_index, (kind, text_a, text_b) in enumerate(merged_ops):
-        len_a = len(text_a)
-        len_b = len(text_b)
-        start_a = cursor_a
-        start_b = cursor_b
-        end_a = cursor_a + len_a
-        end_b = cursor_b + len_b
+    next_anchor_index = 0
+    next_reflow_index = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        window_a = _build_text_window(document_a, left_segments, i1, i2)
+        window_b = _build_text_window(document_b, right_segments, j1, j2)
 
-        if kind == "equal":
-            if include_reflow and _detect_reflow(document_a, document_b, start_a, end_a, start_b, end_b, text_a):
-                left_projection = project_range(document_a, start_a, end_a)
-                right_projection = project_range(document_b, start_b, end_b)
-                reflow_anchors.append(
-                    DiffAnchor(
-                        id=f"reflow-{op_index}",
-                        kind="reflow",
-                        source_type="text",
-                        excerpt_left=_slice_excerpt(left_projection.excerpt or text_a),
-                        excerpt_right=_slice_excerpt(right_projection.excerpt or text_b),
-                        left_fragments=left_projection.fragments,
-                        right_fragments=right_projection.fragments,
-                        left_range=left_projection.char_range,
-                        right_range=right_projection.char_range,
-                        raw_event_count=1,
-                        group_key=f"reflow-{op_index}",
-                        table_context=None,
-                    )
-                )
-                summary.reflows += 1
-        else:
-            resolved_kind, resolved_start_a, resolved_end_a, resolved_start_b, resolved_end_b = (
-                _promote_single_side_edit_to_replace(
-                    kind,
+        if tag == "equal":
+            if include_reflow and (
+                _detect_reflow(
                     document_a,
                     document_b,
-                    start_a,
-                    end_a,
-                    start_b,
-                    end_b,
+                    window_a.raw_start,
+                    window_a.raw_end,
+                    window_b.raw_start,
+                    window_b.raw_end,
+                    _semantic_text_for_range(document_a, window_a.raw_start, window_a.raw_end),
                 )
-            )
-            raw_candidates.append(
-                _ReviewAnchorCandidate(
-                    kind=resolved_kind,
-                    start_a=resolved_start_a if resolved_start_a != resolved_end_a else None,
-                    end_a=resolved_end_a if resolved_start_a != resolved_end_a else None,
-                    start_b=resolved_start_b if resolved_start_b != resolved_end_b else None,
-                    end_b=resolved_end_b if resolved_start_b != resolved_end_b else None,
+            ):
+                reflow_anchors.append(
+                    _build_reflow_anchor(
+                        document_a=document_a,
+                        document_b=document_b,
+                        start_a=window_a.raw_start,
+                        end_a=window_a.raw_end,
+                        start_b=window_b.raw_start,
+                        end_b=window_b.raw_end,
+                        index=next_reflow_index,
+                    )
                 )
-            )
+                next_reflow_index += 1
+                summary.reflows += 1
+            continue
 
-        cursor_a = end_a
-        cursor_b = end_b
-
-    review_candidates = coalesce_review_anchors(
-        raw_candidates,
-        document_a=document_a,
-        document_b=document_b,
-    )
-    text_anchors = [
-        _anchor_from_candidate(
-            candidate,
-            document_a=document_a,
-            document_b=document_b,
-            index=index,
+        confidence = "low" if tag == "replace" and max(window_a.segment_count, window_b.segment_count) >= 5 else "high"
+        window_anchors = _compare_text_window(
+            document_a,
+            document_b,
+            window_a=window_a,
+            window_b=window_b,
+            confidence=confidence,
+            anchor_index_start=next_anchor_index,
         )
-        for index, candidate in enumerate(review_candidates)
-    ]
+        text_anchors.extend(window_anchors)
+        next_anchor_index += len(window_anchors)
 
     table_anchors = _compare_tables(document_a, document_b)
     anchors = sorted(text_anchors + table_anchors + reflow_anchors, key=_anchor_sort_key)

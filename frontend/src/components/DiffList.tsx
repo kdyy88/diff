@@ -57,13 +57,26 @@ export function DiffList({ anchors, activeAnchorId, onSelect }: DiffListProps) {
             >
               <div className="flex items-center justify-between gap-2">
                 <span className="text-sm font-semibold">#{index + 1}</span>
-                <span
-                  className={`rounded-full border px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${
-                    isActive ? 'border-white/30 bg-white/10 text-white' : KIND_STYLE[anchor.kind]
-                  }`}
-                >
-                  {KIND_LABEL[anchor.kind]}
-                </span>
+                <div className="flex items-center gap-2">
+                  {anchor.confidence === 'low' ? (
+                    <span
+                      className={`rounded-full border px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${
+                        isActive
+                          ? 'border-white/20 bg-white/5 text-slate-200'
+                          : 'border-violet-200 bg-violet-50 text-violet-700'
+                      }`}
+                    >
+                      Low Confidence
+                    </span>
+                  ) : null}
+                  <span
+                    className={`rounded-full border px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${
+                      isActive ? 'border-white/30 bg-white/10 text-white' : KIND_STYLE[anchor.kind]
+                    }`}
+                  >
+                    {KIND_LABEL[anchor.kind]}
+                  </span>
+                </div>
               </div>
               <div className="mt-3 space-y-2 text-sm">
                 {tableLabel ? (

@@ -7,7 +7,7 @@ interface ProcessingPageProps {
 const STAGE_LABEL: Record<string, string> = {
   uploaded: 'Upload complete',
   extracting: 'Extracting text and coordinates',
-  aligning: 'Running diff-match-patch on reconstructed text flow',
+  aligning: 'Running line-anchor patience diff and local text diff',
   projecting: 'Projecting diff results back onto PDF coordinates',
   done: 'Review workspace ready',
   failed: 'Job failed',
@@ -22,8 +22,8 @@ export function ProcessingPage({ jobStatus }: ProcessingPageProps) {
           {STAGE_LABEL[jobStatus.stage] ?? 'Processing'}
         </h1>
         <p className="mt-3 text-base leading-7 text-slate-600">
-          The backend is reconstructing a linear text flow, computing a character-level diff, and
-          projecting the results back into page coordinates.
+          The backend is coarse-aligning extracted lines, running local word and character diffs
+          only inside changed windows, and projecting the results back into page coordinates.
         </p>
         <div className="mt-8 h-3 overflow-hidden rounded-full bg-slate-200">
           <div

@@ -151,6 +151,7 @@ Response shape:
       "id": "anchor-text-0",
       "kind": "replace",
       "source_type": "text",
+      "confidence": "high",
       "excerpt_left": "Dose 0.5 mg",
       "excerpt_right": "Dose 0.05 mg",
       "left_fragments": [
@@ -219,6 +220,7 @@ Possible errors:
 - `id`: stable per-result anchor identifier
 - `kind`: `insert | delete | replace | reflow`
 - `source_type`: `text | table`
+- `confidence`: `high | low`
 - `excerpt_left`: review excerpt from the source side
 - `excerpt_right`: review excerpt from the modified side
 - `left_fragments`: projected highlight fragments for the source PDF
@@ -245,11 +247,12 @@ Possible errors:
 
 ## Semantics that matter to integrators
 
-- The backend uses `diff-match-patch` for text diffing. It does not expose raw diff opcodes directly.
+- Body text alignment is two-stage: line-level coarse anchoring with `patiencediff`, then local window refinement with `diff-match-patch`.
 - `anchors` are review-oriented, normalized results, not raw edit events.
 - `replace` anchors may merge several nearby low-level insert/delete events into a single review card.
 - `reflow` anchors represent unchanged content that moved enough to be useful as a position anchor.
 - Table anchors are isolated from paragraph-style anchor coalescing.
+- `confidence="low"` means the anchor came from a larger risky text window that is still shown for recall, not hidden.
 
 ## Coordinate model
 

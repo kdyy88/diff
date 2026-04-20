@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 
-import { createJob, getJobResult, getJobStatus } from './api/client';
+import { ApiError, createJob, getJobResult, getJobStatus } from './api/client';
 import { ProcessingPage } from './pages/ProcessingPage';
 import { ReviewPage } from './pages/ReviewPage';
 import { UploadPage } from './pages/UploadPage';
@@ -17,6 +17,15 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false);
   const [showReflow, setShowReflow] = useState(false);
   const [activeAnchorId, setActiveAnchorId] = useState<string | null>(null);
+
+  const resetToUpload = (message: string) => {
+    setViewState('upload');
+    setJobId(null);
+    setJobStatus(null);
+    setResult(null);
+    setActiveAnchorId(null);
+    setError(message);
+  };
 
   useEffect(() => {
     if (!jobId || viewState !== 'processing') {
@@ -44,11 +53,17 @@ export default function App() {
           return;
         }
         if (status.status === 'failed') {
-          setError(status.error ?? 'Job failed.');
+          resetToUpload(status.error ?? 'Job failed.');
         }
       } catch (nextError) {
         if (active) {
-          setError(nextError instanceof Error ? nextError.message : 'Failed to poll job.');
+          if (nextError instanceof ApiError && nextError.status === 404) {
+            resetToUpload(
+              'The background job is no longer available. This usually happens after the local backend reloads or restarts. Please submit the PDFs again.',
+            );
+            return;
+          }
+          resetToUpload(nextError instanceof Error ? nextError.message : 'Failed to poll job.');
         }
       }
     };

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import unicodedata
 from typing import Any
 
 import fitz
@@ -72,14 +73,30 @@ class TableRegion:
 
 
 @dataclass(slots=True)
+class TextSegment:
+    id: str
+    page: int
+    block: int
+    line: int
+    bbox: tuple[float, float, float, float]
+    raw_text: str
+    aligned_text: str
+    raw_start: int
+    raw_end: int
+
+
+@dataclass(slots=True)
 class DocumentProjection:
     pdf_path: Path
     pages: list[PageInfo]
     chars: list[CharAtom]
     words: list[WordAtom]
     tables: list[TableRegion]
+    text_segments: list[TextSegment]
     raw_text: str
     normalized_text: str
+    aligned_text: str
+    aligned_to_raw: list[int]
 
 
 @dataclass(slots=True)
@@ -94,6 +111,23 @@ class _RawLine:
 def _coerce_bbox(raw_bbox: Any) -> tuple[float, float, float, float]:
     x0, y0, x1, y1 = raw_bbox
     return (float(x0), float(y0), float(x1), float(y1))
+
+
+def _clean_cell_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _should_keep_extracted_char(char: str) -> bool:
+    if not char:
+        return False
+    if char.isspace():
+        return True
+    category = unicodedata.category(char)
+    if category.startswith("C"):
+        return False
+    return True
 
 
 def _line_sort_key(line: _RawLine) -> tuple[int, int, float, float]:
@@ -156,7 +190,8 @@ def _extract_line_chars(
         return [
             (str(item.get("c", "")), _coerce_bbox(item["bbox"]) if item.get("bbox") else None)
             for item in ordered
-            if str(item.get("c", "")) and not _is_inside_any_table(_coerce_bbox(item["bbox"]), tables)
+            if _should_keep_extracted_char(str(item.get("c", "")))
+            and not _is_inside_any_table(_coerce_bbox(item["bbox"]), tables)
         ]
 
     text = span.get("text", "")
@@ -168,7 +203,7 @@ def _extract_line_chars(
     return [
         (char, box)
         for char, box in zip(text, boxes)
-        if not _is_inside_any_table(box, tables)
+        if _should_keep_extracted_char(char) and not _is_inside_any_table(box, tables)
     ]
 
 
@@ -192,13 +227,13 @@ def _extract_tables_from_page(
         if table.row_count <= 0 or table.col_count <= 0:
             continue
 
-        header_names = [name.strip() for name in (getattr(table.header, "names", None) or [])]
+        header_names = [_clean_cell_text(name) for name in (getattr(table.header, "names", None) or [])]
         extracted_rows = table.extract() or []
         header_is_first_row = (
             bool(header_names)
             and bool(extracted_rows)
             and not getattr(table.header, "external", False)
-            and [value.strip() for value in extracted_rows[0]] == header_names
+            and [_clean_cell_text(value) for value in extracted_rows[0]] == header_names
         )
         region = TableRegion(
             id=f"table-{page_number}-{table_index}",
@@ -217,7 +252,7 @@ def _extract_tables_from_page(
             logical_row_index = row_index - (1 if header_is_first_row else 0)
             row_label_candidate = None
             if logical_row_index >= 0 and row_values:
-                first_value = (row_values[0] or "").strip()
+                first_value = _clean_cell_text(row_values[0])
                 row_label_candidate = first_value or None
 
             for col_index, cell_bbox in enumerate(row.cells):
@@ -225,7 +260,7 @@ def _extract_tables_from_page(
                     continue
                 text = ""
                 if col_index < len(row_values):
-                    text = (row_values[col_index] or "").strip()
+                    text = _clean_cell_text(row_values[col_index])
                 col_label = None
                 if col_index < len(header_names):
                     col_label = header_names[col_index] or None
@@ -349,6 +384,35 @@ def _flush_word(
     )
 
 
+def _build_aligned_text(chars: list[CharAtom]) -> tuple[str, list[int]]:
+    aligned_chars: list[str] = []
+    aligned_to_raw: list[int] = []
+    previous_was_space = False
+
+    for raw_index, char in enumerate(chars):
+        normalized = char.norm_char
+        if not normalized:
+            continue
+        if char.synthetic and char.char.isspace():
+            continue
+        if normalized.isspace():
+            if previous_was_space:
+                continue
+            aligned_chars.append(" ")
+            aligned_to_raw.append(raw_index)
+            previous_was_space = True
+            continue
+        aligned_chars.append(normalized)
+        aligned_to_raw.append(raw_index)
+        previous_was_space = False
+
+    return "".join(aligned_chars), aligned_to_raw
+
+
+def _aligned_text_from_atoms(chars: list[CharAtom]) -> str:
+    return _build_aligned_text(chars)[0]
+
+
 def extract_document(
     pdf_path: str | Path,
     *,
@@ -383,6 +447,7 @@ def extract_document(
 
     chars: list[CharAtom] = []
     words: list[WordAtom] = []
+    text_segments: list[TextSegment] = []
     previous_page = -1
     previous_block = -1
     previous_line = -1
@@ -397,6 +462,7 @@ def extract_document(
 
         current_word_chars: list[CharAtom] = []
         word_index = 0
+        segment_start = len(chars)
 
         for char, box in line_item.chars:
             stream_index = len(chars)
@@ -422,12 +488,31 @@ def extract_document(
                 current_word_chars.append(char_atom)
 
         _flush_word(words, current_word_chars, word_index=word_index)
+        segment_end = len(chars)
+        segment_chars = chars[segment_start:segment_end]
+        segment_raw_text = "".join(char.char for char in segment_chars)
+        segment_aligned_text = _aligned_text_from_atoms(segment_chars)
+        if segment_aligned_text:
+            text_segments.append(
+                TextSegment(
+                    id=f"segment-{len(text_segments)}",
+                    page=line_item.page,
+                    block=line_item.block,
+                    line=line_item.line,
+                    bbox=line_item.bbox,
+                    raw_text=segment_raw_text,
+                    aligned_text=segment_aligned_text,
+                    raw_start=segment_start,
+                    raw_end=segment_end,
+                )
+            )
         previous_page = line_item.page
         previous_block = line_item.block
         previous_line = line_item.line
 
     raw_text = "".join(char.char for char in chars)
     normalized_text = "".join(char.norm_char for char in chars)
+    aligned_text, aligned_to_raw = _build_aligned_text(chars)
 
     return DocumentProjection(
         pdf_path=path,
@@ -435,6 +520,9 @@ def extract_document(
         chars=chars,
         words=words,
         tables=tables,
+        text_segments=text_segments,
         raw_text=raw_text,
         normalized_text=normalized_text,
+        aligned_text=aligned_text,
+        aligned_to_raw=aligned_to_raw,
     )

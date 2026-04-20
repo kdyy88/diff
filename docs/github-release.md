@@ -8,7 +8,7 @@ This file collects the metadata and copy you can use when publishing the reposit
 
 ## Suggested short description
 
-High-precision PDF diff review for long documents with pagination reflow, coordinate-projected highlights, and table-aware anchors.
+High-precision PDF diff review for long documents with patience-aligned text flow, coordinate-projected highlights, and table-aware anchors.
 
 ## Suggested GitHub topics
 
@@ -38,8 +38,9 @@ If you later publish docs or a demo, link that here. Until then, leaving it empt
 
 - Async FastAPI backend for PDF diff jobs
 - Cross-page text-flow reconstruction to suppress pagination-only false positives
-- `diff-match-patch` based text diffing with coordinate projection back to PDF space
+- Line-anchor `patiencediff` plus local `diff-match-patch` refinement
 - Review-friendly `insert/delete/replace/reflow` anchors
+- Explicit `high/low` confidence hints without hiding uncertain matches
 - Table-aware extraction for explicit-grid PDFs with cell-level highlights
 - Local React review UI with dual-pane PDF navigation
 
@@ -58,6 +59,10 @@ If you later publish docs or a demo, link that here. Until then, leaving it empt
 - No persistent job queue
 - No exportable audit package yet
 ```
+
+## License note
+
+Current repository metadata is aligned to `GPL-2.0-only` because the backend uses the GPL-licensed `patiencediff` package for coarse text anchoring.
 
 ## Suggested pinned sections for the repo homepage
 
