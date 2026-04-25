@@ -1,10 +1,11 @@
 from pathlib import Path
 import tempfile
 
+from docx import Document as DocxDocument
 import fitz
 
 from app.services.differ import compare_documents
-from app.services.extractor import CharAtom, DocumentProjection, PageInfo, TextSegment, WordAtom
+from app.services.extractor import CharAtom, DocumentProjection, PageInfo, TextSegment, WordAtom, extract_document
 
 
 def _collapsed_mapping(text: str) -> tuple[str, list[int]]:
@@ -83,6 +84,7 @@ def _build_document(text: str, *, page: int = 0, y: float = 100.0) -> DocumentPr
             current_x += 4.0
     return DocumentProjection(
         pdf_path=None,  # type: ignore[arg-type]
+        document_kind="pdf",
         pages=[PageInfo(page=page, width=600.0, height=800.0)],
         chars=chars,
         words=words,
@@ -104,6 +106,7 @@ def _build_document(text: str, *, page: int = 0, y: float = 100.0) -> DocumentPr
         normalized_text=text,
         aligned_text=" ".join(text.split()),
         aligned_to_raw=[index for index, char in enumerate(text) if (not char.isspace()) or (index == 0 or not text[index - 1].isspace())],
+        review_html=None,
     )
 
 
@@ -129,6 +132,7 @@ def _build_character_document(text: str, *, page: int = 0, y: float = 100.0) -> 
         current_x += 8.0
     return DocumentProjection(
         pdf_path=None,  # type: ignore[arg-type]
+        document_kind="pdf",
         pages=[PageInfo(page=page, width=600.0, height=800.0)],
         chars=chars,
         words=[],
@@ -150,6 +154,7 @@ def _build_character_document(text: str, *, page: int = 0, y: float = 100.0) -> 
         normalized_text="".join(" " if char.isspace() else char for char in text),
         aligned_text=" ".join(text.split()),
         aligned_to_raw=[index for index, char in enumerate(text) if (not char.isspace()) or (index == 0 or not text[index - 1].isspace())],
+        review_html=None,
     )
 
 
@@ -235,6 +240,7 @@ def _build_wrapped_document(lines: list[str], *, page: int = 0, y: float = 100.0
 
     return DocumentProjection(
         pdf_path=None,  # type: ignore[arg-type]
+        document_kind="pdf",
         pages=[PageInfo(page=page, width=600.0, height=800.0)],
         chars=chars,
         words=[],
@@ -244,6 +250,7 @@ def _build_wrapped_document(lines: list[str], *, page: int = 0, y: float = 100.0
         normalized_text="".join(char.norm_char for char in chars),
         aligned_text="".join(aligned_chars),
         aligned_to_raw=aligned_to_raw,
+        review_html=None,
     )
 
 
@@ -286,6 +293,7 @@ def _build_real_space_document(text: str, *, page: int = 0, y: float = 100.0) ->
 
     return DocumentProjection(
         pdf_path=None,  # type: ignore[arg-type]
+        document_kind="pdf",
         pages=[PageInfo(page=page, width=600.0, height=800.0)],
         chars=chars,
         words=[],
@@ -307,7 +315,73 @@ def _build_real_space_document(text: str, *, page: int = 0, y: float = 100.0) ->
         normalized_text="".join(char.norm_char for char in chars),
         aligned_text="".join(aligned_chars),
         aligned_to_raw=aligned_to_raw,
+        review_html=None,
     )
+
+
+def test_compare_documents_emits_word_dom_fragments_for_docx_replace() -> None:
+    left_path = Path(tempfile.gettempdir()) / "differ-left.docx"
+    right_path = Path(tempfile.gettempdir()) / "differ-right.docx"
+
+    left_doc = DocxDocument()
+    left_doc.add_paragraph("Chapter 1", style="Heading 1")
+    left_doc.add_paragraph("Original body text")
+    left_table = left_doc.add_table(rows=1, cols=2)
+    left_table.cell(0, 0).text = "A1"
+    left_table.cell(0, 1).text = "B1"
+    left_doc.save(left_path)
+
+    right_doc = DocxDocument()
+    right_doc.add_paragraph("Chapter 1", style="Heading 1")
+    right_doc.add_paragraph("Updated body text")
+    right_table = right_doc.add_table(rows=1, cols=2)
+    right_table.cell(0, 0).text = "A1"
+    right_table.cell(0, 1).text = "B2"
+    right_doc.save(right_path)
+
+    left = extract_document(left_path, header_margin=0, footer_margin=0)
+    right = extract_document(right_path, header_margin=0, footer_margin=0)
+    result = compare_documents(left, right, include_reflow=True)
+
+    assert result.document_kind == "docx"
+    assert result.summary.reflows == 0
+    text_anchor = next(anchor for anchor in result.anchors if anchor.source_type == "text")
+    assert text_anchor.left_fragments[0].kind == "word"
+    assert text_anchor.left_fragments[0].dom_id == "paragraph-1"
+    table_anchor = next(anchor for anchor in result.anchors if anchor.source_type == "table")
+    assert table_anchor.right_fragments[0].kind == "word"
+    assert table_anchor.right_fragments[0].dom_id == "table-2-r0-c1"
+
+
+def test_compare_documents_orders_docx_anchors_by_dom_position() -> None:
+    left_path = Path(tempfile.gettempdir()) / "differ-order-left.docx"
+    right_path = Path(tempfile.gettempdir()) / "differ-order-right.docx"
+
+    left_doc = DocxDocument()
+    left_doc.add_paragraph("Chapter 1", style="Heading 1")
+    left_doc.add_paragraph("Alpha prefix with a long stable lead ending in cat")
+    left_doc.add_paragraph("Beta dog")
+    left_doc.add_paragraph("Gamma yak")
+    left_doc.save(left_path)
+
+    right_doc = DocxDocument()
+    right_doc.add_paragraph("Chapter 1", style="Heading 1")
+    right_doc.add_paragraph("Alpha prefix with a long stable lead ending in dog")
+    right_doc.add_paragraph("Beta fog")
+    right_doc.add_paragraph("Gamma zap")
+    right_doc.save(right_path)
+
+    left = extract_document(left_path, header_margin=0, footer_margin=0)
+    right = extract_document(right_path, header_margin=0, footer_margin=0)
+    result = compare_documents(left, right, include_reflow=False)
+
+    text_anchor_dom_ids = [
+        anchor.left_fragments[0].dom_id
+        for anchor in result.anchors
+        if anchor.source_type == "text" and anchor.left_fragments and anchor.left_fragments[0].kind == "word"
+    ]
+
+    assert text_anchor_dom_ids == ["paragraph-1", "paragraph-2", "paragraph-3"]
 
 
 def _build_table_pdf(path: Path, cell_values: list[list[str]], *, top_label: str) -> None:

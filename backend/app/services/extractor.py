@@ -7,6 +7,7 @@ from typing import Any
 
 import fitz
 
+from app.services.docx_outline import DocxParagraphBlock, load_docx_structure, render_docx_review_html
 from app.services.normalizer import normalize_char
 
 
@@ -32,6 +33,8 @@ class CharAtom:
     word: int | None
     stream_index: int
     synthetic: bool
+    dom_id: str | None = None
+    dom_char_index: int | None = None
 
 
 @dataclass(slots=True)
@@ -55,21 +58,23 @@ class TableCell:
     page: int
     row: int
     col: int
-    bbox: tuple[float, float, float, float]
+    bbox: tuple[float, float, float, float] | None
     text: str
     row_label: str | None = None
     col_label: str | None = None
+    dom_id: str | None = None
 
 
 @dataclass(slots=True)
 class TableRegion:
     id: str
     page: int
-    bbox: tuple[float, float, float, float]
+    bbox: tuple[float, float, float, float] | None
     row_count: int
     col_count: int
     header_names: list[str] = field(default_factory=list)
     cells: list[TableCell] = field(default_factory=list)
+    dom_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -83,11 +88,13 @@ class TextSegment:
     aligned_text: str
     raw_start: int
     raw_end: int
+    dom_id: str | None = None
 
 
 @dataclass(slots=True)
 class DocumentProjection:
-    pdf_path: Path
+    pdf_path: Path | None
+    document_kind: str
     pages: list[PageInfo]
     chars: list[CharAtom]
     words: list[WordAtom]
@@ -97,6 +104,7 @@ class DocumentProjection:
     normalized_text: str
     aligned_text: str
     aligned_to_raw: list[int]
+    review_html: str | None
 
 
 @dataclass(slots=True)
@@ -160,7 +168,7 @@ def _is_inside_any_table(
     if bbox is None:
         return False
     center = _bbox_center(bbox)
-    return any(_bbox_contains_point(table.bbox, center) for table in tables)
+    return any(table.bbox is not None and _bbox_contains_point(table.bbox, center) for table in tables)
 
 
 def _char_boxes_from_span_text(
@@ -413,6 +421,134 @@ def _aligned_text_from_atoms(chars: list[CharAtom]) -> str:
     return _build_aligned_text(chars)[0]
 
 
+def _append_docx_block_text(
+    chars: list[CharAtom],
+    text_segments: list[TextSegment],
+    *,
+    block_index: int,
+    dom_id: str,
+    text: str,
+) -> None:
+    if chars:
+        _add_synthetic_char(chars, "\n", 0, block_index, 0, None)
+
+    segment_start = len(chars)
+    for char_index, char in enumerate(text):
+        stream_index = len(chars)
+        chars.append(
+            CharAtom(
+                id=f"c-{stream_index}",
+                char=char,
+                norm_char=normalize_char(char),
+                page=0,
+                bbox=None,
+                block=block_index,
+                line=0,
+                word=None,
+                stream_index=stream_index,
+                synthetic=False,
+                dom_id=dom_id,
+                dom_char_index=char_index,
+            )
+        )
+
+    segment_end = len(chars)
+    if segment_end == segment_start:
+        return
+
+    segment_chars = chars[segment_start:segment_end]
+    aligned_text = _aligned_text_from_atoms(segment_chars)
+    if not aligned_text:
+        return
+
+    text_segments.append(
+        TextSegment(
+            id=f"segment-{len(text_segments)}",
+            page=0,
+            block=block_index,
+            line=0,
+            bbox=(0.0, float(block_index), max(float(len(text)), 1.0), float(block_index) + 1.0),
+            raw_text=text,
+            aligned_text=aligned_text,
+            raw_start=segment_start,
+            raw_end=segment_end,
+            dom_id=dom_id,
+        )
+    )
+
+
+def _extract_docx_document(
+    docx_path: str | Path,
+    *,
+    block_range: tuple[int, int] | None = None,
+) -> DocumentProjection:
+    path = Path(docx_path)
+    structure = load_docx_structure(path)
+    blocks = structure.blocks
+    if block_range is not None:
+        start_block, end_block = block_range
+        blocks = [block for block in blocks if start_block <= block.index <= end_block]
+
+    chars: list[CharAtom] = []
+    text_segments: list[TextSegment] = []
+    tables: list[TableRegion] = []
+
+    for block in blocks:
+        if isinstance(block, DocxParagraphBlock):
+            _append_docx_block_text(
+                chars,
+                text_segments,
+                block_index=block.index,
+                dom_id=block.dom_id,
+                text=block.text,
+            )
+            continue
+
+        region = TableRegion(
+            id=block.dom_id,
+            page=0,
+            bbox=(0.0, float(block.index), max(float(block.col_count), 1.0), float(block.index) + 1.0),
+            row_count=block.row_count,
+            col_count=block.col_count,
+            dom_id=block.dom_id,
+        )
+        for cell in block.cells:
+            region.cells.append(
+                TableCell(
+                    id=cell.dom_id,
+                    table_id=block.dom_id,
+                    page=0,
+                    row=cell.row,
+                    col=cell.col,
+                    bbox=(float(cell.col), float(cell.row), float(cell.col + 1), float(cell.row + 1)),
+                    text=cell.text,
+                    row_label=cell.row_label,
+                    col_label=cell.col_label,
+                    dom_id=cell.dom_id,
+                )
+            )
+        tables.append(region)
+
+    raw_text = "".join(char.char for char in chars)
+    normalized_text = "".join(char.norm_char for char in chars)
+    aligned_text, aligned_to_raw = _build_aligned_text(chars)
+
+    return DocumentProjection(
+        pdf_path=path,
+        document_kind="docx",
+        pages=[],
+        chars=chars,
+        words=[],
+        tables=tables,
+        text_segments=text_segments,
+        raw_text=raw_text,
+        normalized_text=normalized_text,
+        aligned_text=aligned_text,
+        aligned_to_raw=aligned_to_raw,
+        review_html=render_docx_review_html(structure) if block_range is None else None,
+    )
+
+
 def extract_document(
     pdf_path: str | Path,
     *,
@@ -421,6 +557,9 @@ def extract_document(
     page_range: tuple[int, int] | None = None,
 ) -> DocumentProjection:
     path = Path(pdf_path)
+    if path.suffix.lower() == ".docx":
+        return _extract_docx_document(path, block_range=page_range)
+
     pages: list[PageInfo] = []
     extracted_lines: list[_RawLine] = []
     tables: list[TableRegion] = []
@@ -524,6 +663,7 @@ def extract_document(
 
     return DocumentProjection(
         pdf_path=path,
+        document_kind="pdf",
         pages=pages,
         chars=chars,
         words=words,
@@ -533,11 +673,14 @@ def extract_document(
         normalized_text=normalized_text,
         aligned_text=aligned_text,
         aligned_to_raw=aligned_to_raw,
+        review_html=None,
     )
 
 
 def extract_page_infos(pdf_path: str | Path) -> list[PageInfo]:
     path = Path(pdf_path)
+    if path.suffix.lower() == ".docx":
+        return []
     with fitz.open(path) as doc:
         return [
             PageInfo(page=index, width=float(page.rect.width), height=float(page.rect.height))

@@ -6,11 +6,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 JobState = Literal["uploaded", "extracting", "aligning", "projecting", "done", "failed"]
+DocumentKind = Literal["pdf", "docx"]
+FragmentKind = Literal["pdf", "word"]
 DiffKind = Literal["insert", "delete", "replace", "reflow"]
 SourceType = Literal["text", "table"]
 ConfidenceLevel = Literal["high", "low"]
 ChapterAnalysisState = Literal["uploaded", "analyzing", "fallback", "done", "failed"]
-ChapterSource = Literal["bookmark", "manual", "synthetic"]
+ChapterSource = Literal["bookmark", "heading", "manual", "synthetic"]
 ChapterConfidenceLevel = Literal["high", "medium", "low"]
 AnalysisSide = Literal["source", "modified"]
 ChapterValidationIssueCode = Literal[
@@ -23,9 +25,13 @@ ChapterValidationIssueCode = Literal[
 
 
 class HighlightFragment(BaseModel):
-    page: int
-    bbox: list[float]
-    viewport_ref: str
+    kind: FragmentKind = "pdf"
+    page: int | None = None
+    bbox: list[float] | None = None
+    viewport_ref: str | None = None
+    dom_id: str | None = None
+    char_start: int | None = None
+    char_end: int | None = None
 
 
 class CharRange(BaseModel):
@@ -138,6 +144,7 @@ class ChapterDiffSummary(BaseModel):
 
 
 class DiffResult(BaseModel):
+    document_kind: DocumentKind = "pdf"
     pages_left: list[PageMeta]
     pages_right: list[PageMeta]
     summary: DiffSummary
@@ -147,6 +154,7 @@ class DiffResult(BaseModel):
 
 class JobStatus(BaseModel):
     id: str
+    document_kind: DocumentKind = "pdf"
     status: JobState
     stage: str
     progress: int = 0
@@ -156,11 +164,13 @@ class JobStatus(BaseModel):
 
 class CreateJobResponse(BaseModel):
     id: str
+    document_kind: DocumentKind = "pdf"
     status: JobState
 
 
 class ChapterAnalysisStatus(BaseModel):
     id: str
+    document_kind: DocumentKind = "pdf"
     status: ChapterAnalysisState
     stage: str
     progress: int = 0
@@ -169,6 +179,7 @@ class ChapterAnalysisStatus(BaseModel):
 
 class ChapterAnalysisResult(BaseModel):
     id: str
+    document_kind: DocumentKind = "pdf"
     status: ChapterAnalysisState
     source_plan: DocumentChapterPlan
     modified_plan: DocumentChapterPlan

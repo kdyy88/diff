@@ -8,11 +8,10 @@ from tempfile import mkdtemp
 from time import monotonic
 from uuid import uuid4
 
-from fastapi import UploadFile
-
 from app.core.config import TERMINAL_RECORD_TTL_SECONDS, ensure_default_temp_dir, ensure_markdown_output_dir
 from app.models.schemas import CreateJobResponse, DiffResult, JobStatus
 from app.services.chapters import ChapterExecutionPair, aggregate_chapter_results
+from app.services.document_kind import UploadedDocument
 from app.services.differ import compare_documents
 from app.services.extractor import extract_document, extract_page_infos
 from app.services.markdown_bundle import build_markdown_bundle
@@ -24,11 +23,16 @@ class _JobRecord:
     status: str
     stage: str
     progress: int
+    document_kind: str
     header_margin: float
     footer_margin: float
     include_reflow: bool
     source_path: Path
     modified_path: Path
+    source_filename: str
+    modified_filename: str
+    source_media_type: str
+    modified_media_type: str
     chapter_pairs: list[ChapterExecutionPair] | None = None
     error: str | None = None
     result: DiffResult | None = None
@@ -57,23 +61,28 @@ class JobStore:
 
     async def create_job(
         self,
-        source_pdf: UploadFile,
-        modified_pdf: UploadFile,
+        source_document: UploadedDocument,
+        modified_document: UploadedDocument,
         *,
         header_margin: float,
         footer_margin: float,
         include_reflow: bool,
     ) -> CreateJobResponse:
-        job_id, source_path, modified_path = self._prepare_job_paths()
-        await self._write_upload(source_pdf, source_path)
-        await self._write_upload(modified_pdf, modified_path)
+        job_id, source_path, modified_path = self._prepare_job_paths(source_document, modified_document)
+        self._write_upload(source_document.content, source_path)
+        self._write_upload(modified_document.content, modified_path)
         return self._register_job(
             job_id,
             source_path,
             modified_path,
+            document_kind=source_document.kind,
             header_margin=header_margin,
             footer_margin=footer_margin,
             include_reflow=include_reflow,
+            source_filename=source_document.filename,
+            modified_filename=modified_document.filename,
+            source_media_type=source_document.media_type,
+            modified_media_type=modified_document.media_type,
             chapter_pairs=None,
         )
 
@@ -82,28 +91,50 @@ class JobStore:
         source_path: str | Path,
         modified_path: str | Path,
         *,
+        document_kind: str,
         header_margin: float,
         footer_margin: float,
         include_reflow: bool,
+        source_filename: str,
+        modified_filename: str,
+        source_media_type: str,
+        modified_media_type: str,
         chapter_pairs: list[ChapterExecutionPair],
     ) -> CreateJobResponse:
-        job_id, next_source_path, next_modified_path = self._prepare_job_paths()
+        source_input_path = Path(source_path)
+        modified_input_path = Path(modified_path)
+        job_id, next_source_path, next_modified_path = self._prepare_job_paths_from_suffixes(
+            source_input_path.suffix,
+            modified_input_path.suffix,
+        )
         shutil.copyfile(source_path, next_source_path)
         shutil.copyfile(modified_path, next_modified_path)
         return self._register_job(
             job_id,
             next_source_path,
             next_modified_path,
+            document_kind=document_kind,
             header_margin=header_margin,
             footer_margin=footer_margin,
             include_reflow=include_reflow,
+            source_filename=source_filename,
+            modified_filename=modified_filename,
+            source_media_type=source_media_type,
+            modified_media_type=modified_media_type,
             chapter_pairs=chapter_pairs,
         )
 
-    def _prepare_job_paths(self) -> tuple[str, Path, Path]:
+    def _prepare_job_paths(
+        self,
+        source_document: UploadedDocument,
+        modified_document: UploadedDocument,
+    ) -> tuple[str, Path, Path]:
+        return self._prepare_job_paths_from_suffixes(source_document.suffix, modified_document.suffix)
+
+    def _prepare_job_paths_from_suffixes(self, source_suffix: str, modified_suffix: str) -> tuple[str, Path, Path]:
         job_id = f"job-{uuid4().hex}"
         job_dir = Path(mkdtemp(prefix=f"{job_id}-", dir=ensure_default_temp_dir()))
-        return job_id, job_dir / "source.pdf", job_dir / "modified.pdf"
+        return job_id, job_dir / f"source{source_suffix}", job_dir / f"modified{modified_suffix}"
 
     def _register_job(
         self,
@@ -111,35 +142,44 @@ class JobStore:
         source_path: Path,
         modified_path: Path,
         *,
+        document_kind: str,
         header_margin: float,
         footer_margin: float,
         include_reflow: bool,
+        source_filename: str,
+        modified_filename: str,
+        source_media_type: str,
+        modified_media_type: str,
         chapter_pairs: list[ChapterExecutionPair] | None,
     ) -> CreateJobResponse:
         self._cleanup_expired_jobs()
         timestamp = monotonic()
+        effective_reflow = include_reflow if document_kind == "pdf" else False
         job = _JobRecord(
             id=job_id,
             status="uploaded",
             stage="uploaded",
             progress=0,
+            document_kind=document_kind,
             header_margin=header_margin,
             footer_margin=footer_margin,
-            include_reflow=include_reflow,
+            include_reflow=effective_reflow,
             source_path=source_path,
             modified_path=modified_path,
+            source_filename=source_filename,
+            modified_filename=modified_filename,
+            source_media_type=source_media_type,
+            modified_media_type=modified_media_type,
             chapter_pairs=chapter_pairs,
             created_at=timestamp,
             last_accessed_at=timestamp,
         )
         self._jobs[job_id] = job
         asyncio.create_task(self._run_job(job_id))
-        return CreateJobResponse(id=job_id, status="uploaded")
+        return CreateJobResponse(id=job_id, document_kind=document_kind, status="uploaded")
 
-    async def _write_upload(self, upload: UploadFile, path: Path) -> None:
-        content = await upload.read()
+    def _write_upload(self, content: bytes, path: Path) -> None:
         path.write_bytes(content)
-        await upload.close()
 
     async def _run_job(self, job_id: str) -> None:
         job = self._jobs[job_id]
@@ -191,7 +231,13 @@ class JobStore:
         output_dir = ensure_markdown_output_dir() / job_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        bundle = build_markdown_bundle(job_id, result)
+        job = self._jobs.get(job_id)
+        bundle = build_markdown_bundle(
+            job_id,
+            result,
+            source_document_path=job.source_path if job else None,
+            modified_document_path=job.modified_path if job else None,
+        )
         for bundle_file in bundle.files:
             (output_dir / bundle_file.name).write_text(bundle_file.content, encoding="utf-8")
 
@@ -248,6 +294,7 @@ class JobStore:
         self._touch_job(job)
         return JobStatus(
             id=job.id,
+            document_kind=job.document_kind,
             status=job.status,
             stage=job.stage,
             progress=job.progress,
@@ -272,6 +319,28 @@ class JobStore:
         if side == "modified":
             return job.modified_path
         raise ValueError(f"Unsupported file side: {side}")
+
+    def get_file_metadata(self, job_id: str, side: str) -> tuple[Path, str, str]:
+        self._cleanup_expired_jobs()
+        job = self._jobs[job_id]
+        self._touch_job(job)
+        if side == "source":
+            return job.source_path, job.source_media_type, job.source_filename
+        if side == "modified":
+            return job.modified_path, job.modified_media_type, job.modified_filename
+        raise ValueError(f"Unsupported file side: {side}")
+
+    def get_review_html(self, job_id: str, side: str) -> str:
+        self._cleanup_expired_jobs()
+        job = self._jobs[job_id]
+        self._touch_job(job)
+        if job.document_kind != "docx":
+            raise ValueError("Review HTML is only available for DOCX jobs.")
+        path = job.source_path if side == "source" else job.modified_path if side == "modified" else None
+        if path is None:
+            raise ValueError(f"Unsupported file side: {side}")
+        projection = extract_document(path, header_margin=job.header_margin, footer_margin=job.footer_margin)
+        return projection.review_html or ""
 
 
 job_store = JobStore()

@@ -26,6 +26,7 @@ dependencies = [
   "fastapi>=0.116.0,<1.0.0",
   "uvicorn[standard]>=0.35.0,<1.0.0",
   "python-multipart>=0.0.20,<1.0.0",
+  "python-docx>=1.2.0,<2.0.0",
   "pymupdf>=1.26.0,<2.0.0",
   "diff-match-patch>=20241021",
   "patiencediff>=0.2.18,<0.3.0",

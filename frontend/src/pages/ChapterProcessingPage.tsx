@@ -17,8 +17,9 @@ export function ChapterProcessingPage({ analysisStatus }: ChapterProcessingPageP
               : 'Scanning document structure'}
         </h1>
         <p className="mt-3 text-base leading-7 text-slate-600">
-          The backend is checking whether both PDFs contain usable standard bookmarks. If either document does not,
-          the app automatically falls back to the normal full-document diff flow.
+          {analysisStatus.document_kind === 'pdf'
+            ? 'The backend is checking whether both PDFs contain usable standard bookmarks. If either document does not, the app automatically falls back to the normal full-document diff flow.'
+            : 'The backend is checking whether both DOCX files contain usable Heading 1 boundaries. If either document does not, the app automatically falls back to the normal full-document diff flow.'}
         </p>
         <div className="mt-8 h-3 overflow-hidden rounded-full bg-slate-200">
           <div

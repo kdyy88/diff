@@ -24,9 +24,26 @@ def project_bbox(
 ) -> list[HighlightFragment]:
     return [
         HighlightFragment(
+            kind="pdf",
             page=page,
             bbox=[bbox[0], bbox[1], bbox[2], bbox[3]],
             viewport_ref=viewport_ref,
+        )
+    ]
+
+
+def project_dom_fragment(
+    *,
+    dom_id: str,
+    char_start: int,
+    char_end: int,
+) -> list[HighlightFragment]:
+    return [
+        HighlightFragment(
+            kind="word",
+            dom_id=dom_id,
+            char_start=char_start,
+            char_end=char_end,
         )
     ]
 
@@ -41,7 +58,7 @@ def _real_char_slice(
     return [
         char
         for char in document.chars[start:end]
-        if not char.synthetic and char.bbox is not None and char.char.strip()
+        if not char.synthetic and char.char.strip() and (char.bbox is not None or char.dom_id is not None)
     ]
 
 
@@ -53,6 +70,46 @@ def project_range(
     real_chars = _real_char_slice(document, start, end)
     if not real_chars:
         return FragmentProjection(fragments=[], excerpt="", char_range=None)
+
+    if document.document_kind == "docx":
+        groups: list[list[CharAtom]] = []
+        current: list[CharAtom] = []
+        for char in real_chars:
+            if not current:
+                current = [char]
+                continue
+            previous = current[-1]
+            contiguous = (
+                char.dom_id == previous.dom_id
+                and char.dom_char_index is not None
+                and previous.dom_char_index is not None
+                and char.dom_char_index == previous.dom_char_index + 1
+            )
+            if contiguous:
+                current.append(char)
+            else:
+                groups.append(current)
+                current = [char]
+
+        if current:
+            groups.append(current)
+
+        fragments = [
+            HighlightFragment(
+                kind="word",
+                dom_id=group[0].dom_id,
+                char_start=group[0].dom_char_index,
+                char_end=(group[-1].dom_char_index or 0) + 1,
+            )
+            for group in groups
+            if group[0].dom_id is not None and group[0].dom_char_index is not None
+        ]
+        excerpt = "".join(char.char for char in real_chars[:80]).strip()
+        return FragmentProjection(
+            fragments=fragments,
+            excerpt=excerpt,
+            char_range=CharRange(start=start, end=end),
+        )
 
     groups: list[list[CharAtom]] = []
     current: list[CharAtom] = []
@@ -96,6 +153,7 @@ def project_range(
         seen_boxes.add(dedupe_key)
         fragments.append(
             HighlightFragment(
+                kind="pdf",
                 page=page,
                 bbox=[x0, y0, x1, y1],
                 viewport_ref=f"page-{page}-fragment-{group_index}",

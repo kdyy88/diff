@@ -1,4 +1,5 @@
 interface ControlBarProps {
+  allowReflow: boolean;
   currentIndex: number;
   total: number;
   showReflow: boolean;
@@ -8,6 +9,7 @@ interface ControlBarProps {
 }
 
 export function ControlBar({
+  allowReflow,
   currentIndex,
   total,
   showReflow,
@@ -41,17 +43,19 @@ export function ControlBar({
           >
             Next
           </button>
-          <button
-            className={`rounded-full px-3 py-2 text-sm font-semibold transition ${
-              showReflow
-                ? 'bg-slate-900 text-white shadow-md shadow-slate-300'
-                : 'border border-slate-300 bg-white text-slate-700 hover:border-slate-400 hover:bg-slate-50'
-            }`}
-            onClick={onToggleReflow}
-            type="button"
-          >
-            {showReflow ? 'Hide Reflow' : 'Show Reflow'}
-          </button>
+          {allowReflow ? (
+            <button
+              className={`rounded-full px-3 py-2 text-sm font-semibold transition ${
+                showReflow
+                  ? 'bg-slate-900 text-white shadow-md shadow-slate-300'
+                  : 'border border-slate-300 bg-white text-slate-700 hover:border-slate-400 hover:bg-slate-50'
+              }`}
+              onClick={onToggleReflow}
+              type="button"
+            >
+              {showReflow ? 'Hide Reflow' : 'Show Reflow'}
+            </button>
+          ) : null}
         </div>
       </div>
     </div>

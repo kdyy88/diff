@@ -20,8 +20,8 @@ import type { ChapterAnalysisResult, ChapterAnalysisStatus, DiffResult, FeatureF
 type ViewState = 'upload' | 'chapter-processing' | 'chapter-confirm' | 'processing' | 'review';
 
 interface SubmitInput {
-  sourcePdf: File;
-  modifiedPdf: File;
+  sourceFile: File;
+  modifiedFile: File;
   headerMargin: number;
   footerMargin: number;
   enableChapterSplit: boolean;
@@ -93,11 +93,11 @@ export default function App() {
 
   const startFullDocumentJob = async (input: SubmitInput) => {
     const response = await createJob({
-      sourcePdf: input.sourcePdf,
-      modifiedPdf: input.modifiedPdf,
+      sourceFile: input.sourceFile,
+      modifiedFile: input.modifiedFile,
       headerMargin: input.headerMargin,
       footerMargin: input.footerMargin,
-      showReflow: true,
+      showReflow: input.sourceFile.name.toLowerCase().endsWith('.pdf'),
     });
     setPendingSubmit(null);
     setJobId(response.id);
@@ -127,6 +127,7 @@ export default function App() {
             return;
           }
           setResult(nextResult);
+          setShowReflow(nextResult.document_kind === 'pdf');
           setActiveChapterId(null);
           const firstVisible = nextResult.anchors.find((anchor) => anchor.kind !== 'reflow') ?? nextResult.anchors[0] ?? null;
           setActiveAnchorId(firstVisible?.id ?? null);
@@ -252,11 +253,11 @@ export default function App() {
     try {
       if (features.chapterSplit && input.enableChapterSplit) {
         const response = await createChapterAnalysis({
-          sourcePdf: input.sourcePdf,
-          modifiedPdf: input.modifiedPdf,
+          sourceFile: input.sourceFile,
+          modifiedFile: input.modifiedFile,
           headerMargin: input.headerMargin,
           footerMargin: input.footerMargin,
-          showReflow: true,
+          showReflow: input.sourceFile.name.toLowerCase().endsWith('.pdf'),
         });
         setAnalysisId(response.id);
         setViewState('chapter-processing');

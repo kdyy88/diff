@@ -1,9 +1,11 @@
 import { useState, type FormEvent } from 'react';
 
+import type { DocumentKind } from '../types/api';
+
 interface UploadPageProps {
   onSubmit: (input: {
-    sourcePdf: File;
-    modifiedPdf: File;
+    sourceFile: File;
+    modifiedFile: File;
     headerMargin: number;
     footerMargin: number;
     enableChapterSplit: boolean;
@@ -23,19 +25,26 @@ export function UploadPage({
   enableChapterSplit,
   onEnableChapterSplitChange,
 }: UploadPageProps) {
-  const [sourcePdf, setSourcePdf] = useState<File | null>(null);
-  const [modifiedPdf, setModifiedPdf] = useState<File | null>(null);
+  const [sourceFile, setSourceFile] = useState<File | null>(null);
+  const [modifiedFile, setModifiedFile] = useState<File | null>(null);
   const [headerMargin, setHeaderMargin] = useState(50);
   const [footerMargin, setFooterMargin] = useState(50);
 
+  const sourceKind = getDocumentKind(sourceFile);
+  const modifiedKind = getDocumentKind(modifiedFile);
+  const kindsMatch = !sourceKind || !modifiedKind || sourceKind === modifiedKind;
+  const documentKind: DocumentKind = sourceKind ?? modifiedKind ?? 'pdf';
+  const isPdfMode = documentKind === 'pdf';
+  const validationError = !kindsMatch ? 'Select two files with the same format: PDF-PDF or DOCX-DOCX.' : null;
+
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!sourcePdf || !modifiedPdf) {
+    if (!sourceFile || !modifiedFile || !kindsMatch) {
       return;
     }
     await onSubmit({
-      sourcePdf,
-      modifiedPdf,
+      sourceFile,
+      modifiedFile,
       headerMargin,
       footerMargin,
       enableChapterSplit,
@@ -47,13 +56,13 @@ export function UploadPage({
       <div className="grid w-full gap-8 lg:grid-cols-[1.1fr_0.9fr]">
         <section className="rounded-[40px] border border-white/60 bg-white/80 p-8 shadow-2xl shadow-slate-200/60 backdrop-blur">
           <p className="text-xs font-semibold uppercase tracking-[0.28em] text-emerald-700">Text Flow Reconstruction</p>
-          <h1 className="mt-4 text-4xl font-semibold tracking-tight text-slate-950">Audit-grade PDF diff for pagination reflow</h1>
+          <h1 className="mt-4 text-4xl font-semibold tracking-tight text-slate-950">Audit-grade document diff for layout-safe review</h1>
           <p className="mt-4 max-w-2xl text-base leading-7 text-slate-600">
-            Upload the source and modified PDFs, reconstruct each document as a continuous text stream,
-            compute a character-level diff, then project the changes back onto the original pages for review.
+            Upload the source and modified PDFs or DOCX files, reconstruct each document as a reviewable text flow,
+            compute a character-level diff, and project the changes back onto page or DOM anchors for side-by-side audit.
           </p>
           <div className="mt-8 grid gap-4 sm:grid-cols-3">
-            <Metric title="Non-linear aware" value="Across pages" />
+            <Metric title="Input formats" value="PDF or DOCX" />
             <Metric title="Diff precision" value="Character-level" />
             <Metric title="Reviewer focus" value={chapterFeatureEnabled ? 'Whole book or by chapter' : 'Anchor-driven'} />
           </div>
@@ -65,12 +74,18 @@ export function UploadPage({
             <h2 className="mt-2 text-2xl font-semibold text-slate-950">Start a new comparison</h2>
           </div>
           <form className="mt-8 space-y-5" onSubmit={handleSubmit}>
-            <FileField label="Source PDF" onChange={(file) => setSourcePdf(file)} selectedFile={sourcePdf} />
-            <FileField label="Modified PDF" onChange={(file) => setModifiedPdf(file)} selectedFile={modifiedPdf} />
-            <div className="grid gap-4 sm:grid-cols-2">
-              <NumberField label="Header margin (pt)" value={headerMargin} onChange={setHeaderMargin} />
-              <NumberField label="Footer margin (pt)" value={footerMargin} onChange={setFooterMargin} />
-            </div>
+            <FileField label="Source document" onChange={(file) => setSourceFile(file)} selectedFile={sourceFile} />
+            <FileField label="Modified document" onChange={(file) => setModifiedFile(file)} selectedFile={modifiedFile} />
+            {isPdfMode ? (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <NumberField label="Header margin (pt)" value={headerMargin} onChange={setHeaderMargin} />
+                <NumberField label="Footer margin (pt)" value={footerMargin} onChange={setFooterMargin} />
+              </div>
+            ) : (
+              <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 px-4 py-4 text-sm leading-6 text-slate-600">
+                DOCX review uses semantic DOM anchors from the Word structure tree. Header/footer margins and PDF reflow controls do not apply.
+              </div>
+            )}
             {chapterFeatureEnabled ? (
               <label className="flex items-start gap-3 rounded-[24px] border border-slate-200 bg-slate-50/80 px-4 py-4">
                 <input
@@ -82,19 +97,19 @@ export function UploadPage({
                 <div>
                   <p className="text-sm font-semibold text-slate-900">Compare chapter by chapter</p>
                   <p className="mt-1 text-sm leading-6 text-slate-600">
-                    Run bookmark-based chapter analysis first, review the detected outline, then diff each matched chapter.
+                    Run structure-based chapter analysis first, review the detected outline, then diff each matched chapter.
                   </p>
                 </div>
               </label>
             ) : null}
-            {error ? (
+            {validationError || error ? (
               <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-                {error}
+                {validationError ?? error}
               </div>
             ) : null}
             <button
               className="w-full rounded-full bg-slate-950 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-slate-300 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
-              disabled={!sourcePdf || !modifiedPdf || submitting}
+              disabled={!sourceFile || !modifiedFile || !kindsMatch || submitting}
               type="submit"
             >
               {submitting ? 'Submitting…' : chapterFeatureEnabled && enableChapterSplit ? 'Analyze chapters' : 'Run diff job'}
@@ -128,7 +143,7 @@ function FileField({
     <label className="block rounded-[28px] border border-dashed border-slate-300 bg-slate-50/70 p-5">
       <p className="text-sm font-semibold text-slate-800">{label}</p>
       <input
-        accept="application/pdf"
+        accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         className="mt-4 block w-full text-sm text-slate-600 file:mr-4 file:rounded-full file:border-0 file:bg-slate-950 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-slate-800"
         onChange={(event) => onChange(event.target.files?.[0] ?? null)}
         type="file"
@@ -136,6 +151,13 @@ function FileField({
       <p className="mt-3 text-sm text-slate-500">{selectedFile?.name ?? 'No file selected yet.'}</p>
     </label>
   );
+}
+
+function getDocumentKind(file: File | null): DocumentKind | null {
+  if (!file) {
+    return null;
+  }
+  return file.name.toLowerCase().endsWith('.docx') ? 'docx' : 'pdf';
 }
 
 function NumberField({

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from io import BytesIO
 from pathlib import Path
 import tempfile
+import zipfile
 
+from docx import Document as DocxDocument
 import fitz
 from fastapi.testclient import TestClient
 
@@ -20,10 +23,38 @@ from app.services.chapters import (
     ChapterBookmarksUnavailable,
     ChapterExecutionPair,
     aggregate_chapter_results,
+    analyze_docx_heading_plan,
     analyze_document_plan,
     validate_chapter_match,
 )
 from app.services.extractor import PageInfo
+
+
+def _build_minimal_docx_bytes() -> bytes:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, mode='w') as archive:
+        archive.writestr('[Content_Types].xml', '<Types />')
+        archive.writestr('word/document.xml', '<w:document />')
+    return buffer.getvalue()
+
+
+def _build_heading_docx_bytes(*, include_heading: bool) -> bytes:
+    document = DocxDocument()
+    document.add_paragraph('Preface body text before any headings.')
+    if include_heading:
+        document.add_paragraph('Chapter 1', style='Heading 1')
+        document.add_paragraph('Body for chapter one.')
+        table = document.add_table(rows=1, cols=2)
+        table.cell(0, 0).text = 'Cell A'
+        table.cell(0, 1).text = 'Cell B'
+        document.add_paragraph('Chapter 2', style='Heading 1')
+        document.add_paragraph('Body for chapter two.')
+    else:
+        document.add_paragraph('Just another normal paragraph.')
+
+    buffer = BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
 
 
 def test_normalize_bookmark_entries_prefers_dest_page_and_injects_front_matter() -> None:
@@ -173,6 +204,39 @@ def test_analyze_document_plan_requires_bookmarks() -> None:
             raise AssertionError('Expected chapter analysis to require standard bookmarks.')
 
 
+def test_analyze_docx_heading_plan_injects_front_matter() -> None:
+    with tempfile.TemporaryDirectory(prefix='chapter-plan-docx-tests-') as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        docx_path = temp_dir / 'outline.docx'
+        docx_path.write_bytes(_build_heading_docx_bytes(include_heading=True))
+
+        plan = analyze_docx_heading_plan(docx_path, 'source')
+
+        assert plan is not None
+        assert plan.total_pages == 6
+        assert [chapter.title for chapter in plan.chapters] == ['Front Matter', 'Chapter 1', 'Chapter 2']
+        assert plan.chapters[1].source == 'heading'
+
+
+def test_analyze_document_plan_docx_requires_heading_one() -> None:
+    with tempfile.TemporaryDirectory(prefix='chapter-plan-docx-fallback-') as temp_dir_name:
+        temp_dir = Path(temp_dir_name)
+        outline_path = temp_dir / 'outline.docx'
+        outline_path.write_bytes(_build_heading_docx_bytes(include_heading=True))
+        fallback_path = temp_dir / 'fallback.docx'
+        fallback_path.write_bytes(_build_heading_docx_bytes(include_heading=False))
+
+        plan = asyncio.run(analyze_document_plan(outline_path, 'source', document_kind='docx'))
+        assert plan.chapters[1].title == 'Chapter 1'
+
+        try:
+            asyncio.run(analyze_document_plan(fallback_path, 'source', document_kind='docx'))
+        except ChapterBookmarksUnavailable as exc:
+            assert 'No usable Heading 1 outline' in str(exc)
+        else:
+            raise AssertionError('Expected DOCX chapter analysis to require Heading 1 paragraphs.')
+
+
 def test_feature_flag_off_keeps_jobs_route_available_and_hides_chapter_routes(monkeypatch) -> None:
     client = TestClient(app)
     monkeypatch.setattr('app.api.routes.PDF_FLOW_DIFF_ENABLE_CHAPTER_SPLIT', False)
@@ -220,3 +284,80 @@ def test_jobs_route_rejects_large_uploads(monkeypatch) -> None:
 
     assert response.status_code == 413
     assert response.json()['detail'] == 'PDF uploads must be smaller than 0 MB.'
+
+
+def test_jobs_route_accepts_neutral_upload_field_aliases() -> None:
+    client = TestClient(app)
+
+    source_doc = fitz.open()
+    source_doc.new_page().insert_text((72, 72), 'source')
+    source_bytes = source_doc.tobytes()
+    source_doc.close()
+
+    modified_doc = fitz.open()
+    modified_doc.new_page().insert_text((72, 72), 'modified')
+    modified_bytes = modified_doc.tobytes()
+    modified_doc.close()
+
+    response = client.post(
+        '/api/jobs',
+        files={
+            'sourceFile': ('source.pdf', source_bytes, 'application/pdf'),
+            'modifiedFile': ('modified.pdf', modified_bytes, 'application/pdf'),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()['status'] == 'uploaded'
+
+
+def test_jobs_route_rejects_mixed_document_kinds() -> None:
+    client = TestClient(app)
+
+    response = client.post(
+        '/api/jobs',
+        files={
+            'sourcePdf': ('source.pdf', b'%PDF-1.4\nsource', 'application/pdf'),
+            'modifiedPdf': (
+                'modified.docx',
+                _build_minimal_docx_bytes(),
+                'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            ),
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()['detail'] == 'Both uploads must use the same document format. Supported pairs are PDF-PDF and DOCX-DOCX.'
+
+
+def test_jobs_route_accepts_docx_pairs() -> None:
+    client = TestClient(app)
+    docx_bytes = _build_minimal_docx_bytes()
+
+    response = client.post(
+        '/api/jobs',
+        files={
+            'sourceFile': ('source.docx', docx_bytes, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+            'modifiedFile': ('modified.docx', docx_bytes, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()['status'] == 'uploaded'
+    assert response.json()['document_kind'] == 'docx'
+
+
+def test_chapter_analysis_route_accepts_docx_pairs() -> None:
+    client = TestClient(app)
+    docx_bytes = _build_heading_docx_bytes(include_heading=True)
+
+    response = client.post(
+        '/api/chapter-analyses',
+        files={
+            'sourceFile': ('source.docx', docx_bytes, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+            'modifiedFile': ('modified.docx', docx_bytes, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()['status'] == 'uploaded'

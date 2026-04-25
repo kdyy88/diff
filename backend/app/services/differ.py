@@ -8,9 +8,9 @@ from diff_match_patch import diff_match_patch
 from patiencediff import PatienceSequenceMatcher
 
 from app.core.config import REFLOW_MIN_CHARS, REFLOW_MIN_DELTA_Y
-from app.models.schemas import DiffAnchor, DiffResult, DiffSummary, PageMeta, TableContext
+from app.models.schemas import DiffAnchor, DiffResult, DiffSummary, HighlightFragment, PageMeta, TableContext
 from app.services.extractor import CharAtom, DocumentProjection, TableCell, TableRegion, TextSegment
-from app.services.projector import project_bbox, project_range
+from app.services.projector import project_bbox, project_dom_fragment, project_range
 
 
 DIFF_DELETE = -1
@@ -21,6 +21,7 @@ STRONG_BOUNDARY_CHARS = {"\n", ".", "。", ";", "；", "!", "！", "?", "？"}
 EXCERPT_TARGET_MIN_CHARS = 80
 EXCERPT_TARGET_MAX_CHARS = 160
 LIST_PREFIX_RE = re.compile(r"^\(?[0-9一二三四五六七八九十]+\)?[、.．)]?$")
+WORD_DOM_ID_RE = re.compile(r"^(heading|paragraph|table)-(?P<block>\d+)(?:-r(?P<row>\d+)-c(?P<col>\d+))?$")
 
 
 @dataclass(slots=True)
@@ -699,7 +700,25 @@ def _table_excerpt(cell: TableCell | None, text: str) -> str:
 
 
 def _table_sort_key(table: TableRegion) -> tuple[int, float, float]:
+    if table.bbox is None:
+        return (10**9, 10**9, 10**9)
     return (table.page, table.bbox[1], table.bbox[0])
+
+
+def _project_table_cell(cell: TableCell, *, viewport_ref: str) -> list[HighlightFragment]:
+    if cell.dom_id is not None:
+        return project_dom_fragment(dom_id=cell.dom_id, char_start=0, char_end=max(len(cell.text), 1))
+    if cell.bbox is None:
+        return []
+    return project_bbox(page=cell.page, bbox=cell.bbox, viewport_ref=viewport_ref)
+
+
+def _project_table_region(table: TableRegion, *, viewport_ref: str) -> list[HighlightFragment]:
+    if table.dom_id is not None:
+        return project_dom_fragment(dom_id=table.dom_id, char_start=0, char_end=0)
+    if table.bbox is None:
+        return []
+    return project_bbox(page=table.page, bbox=table.bbox, viewport_ref=viewport_ref)
 
 
 def _table_rows(table: TableRegion) -> list[list[TableCell]]:
@@ -757,12 +776,12 @@ def _build_table_cell_anchor(
     left_text = left_cell.text if left_cell else ""
     right_text = right_cell.text if right_cell else ""
     left_fragments = (
-        project_bbox(page=left_cell.page, bbox=left_cell.bbox, viewport_ref=f"{anchor_id}-left")
+        _project_table_cell(left_cell, viewport_ref=f"{anchor_id}-left")
         if left_cell
         else []
     )
     right_fragments = (
-        project_bbox(page=right_cell.page, bbox=right_cell.bbox, viewport_ref=f"{anchor_id}-right")
+        _project_table_cell(right_cell, viewport_ref=f"{anchor_id}-right")
         if right_cell
         else []
     )
@@ -791,12 +810,12 @@ def _build_table_structure_anchor(
     kind: str,
 ) -> DiffAnchor:
     left_fragments = (
-        project_bbox(page=left_table.page, bbox=left_table.bbox, viewport_ref=f"{anchor_id}-left")
+        _project_table_region(left_table, viewport_ref=f"{anchor_id}-left")
         if left_table
         else []
     )
     right_fragments = (
-        project_bbox(page=right_table.page, bbox=right_table.bbox, viewport_ref=f"{anchor_id}-right")
+        _project_table_region(right_table, viewport_ref=f"{anchor_id}-right")
         if right_table
         else []
     )
@@ -1069,12 +1088,37 @@ def _compare_tables(
     return anchors
 
 
-def _anchor_sort_key(anchor: DiffAnchor) -> tuple[int, float, float, str]:
+def _word_fragment_sort_key(fragment: HighlightFragment) -> tuple[int, int, int, float, str]:
+    dom_id = fragment.dom_id or ""
+    match = WORD_DOM_ID_RE.match(dom_id)
+    if not match:
+        return (10**8, 10**8, 10**8, float(fragment.char_start or 0), dom_id)
+
+    row_group = match.group("row")
+    col_group = match.group("col")
+    return (
+        int(match.group("block")),
+        int(row_group) if row_group is not None else -1,
+        int(col_group) if col_group is not None else -1,
+        float(fragment.char_start or 0),
+        dom_id,
+    )
+
+
+def _anchor_sort_key(anchor: DiffAnchor) -> tuple[int, float, float, float, str]:
     fragments = anchor.left_fragments or anchor.right_fragments
     if fragments:
         fragment = fragments[0]
-        return (fragment.page, fragment.bbox[1], fragment.bbox[0], anchor.id)
-    return (10**9, 10**9, 10**9, anchor.id)
+        if fragment.kind == "pdf" and fragment.page is not None and fragment.bbox is not None:
+            return (0, float(fragment.page), fragment.bbox[1], fragment.bbox[0], anchor.id)
+
+        word_positions = [_word_fragment_sort_key(item) for item in fragments if item.kind == "word"]
+        if word_positions:
+            block_index, row_index, col_index, char_start, dom_id = min(word_positions)
+            cell_order = (row_index * 1000) + col_index if row_index >= 0 and col_index >= 0 else float(row_index)
+            return (1, float(block_index), cell_order, char_start, f"{dom_id}:{anchor.id}")
+
+    return (2, 10**9, 10**9, 10**9, anchor.id)
 
 
 def compare_documents(
@@ -1097,6 +1141,7 @@ def compare_documents(
         pages_a=len(document_a.pages),
         pages_b=len(document_b.pages),
     )
+    allow_reflow = include_reflow and document_a.document_kind == document_b.document_kind == "pdf"
 
     next_anchor_index = 0
     next_reflow_index = 0
@@ -1105,7 +1150,7 @@ def compare_documents(
         window_b = _build_text_window(document_b, right_segments, j1, j2)
 
         if tag == "equal":
-            if include_reflow and (
+            if allow_reflow and (
                 _detect_reflow(
                     document_a,
                     document_b,
@@ -1155,6 +1200,7 @@ def compare_documents(
             summary.replacements += 1
 
     return DiffResult(
+        document_kind=document_a.document_kind,
         pages_left=[PageMeta(page=item.page, width=item.width, height=item.height) for item in document_a.pages],
         pages_right=[PageMeta(page=item.page, width=item.width, height=item.height) for item in document_b.pages],
         summary=summary,

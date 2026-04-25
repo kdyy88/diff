@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from pathlib import Path
+from typing import Sequence
 
-from app.models.schemas import ChapterDiffSummary, DiffAnchor, DiffResult
+from app.models.schemas import ChapterDiffSummary, DiffAnchor, DiffResult, HighlightFragment
+from app.services.docx_markdown_diff import DocxAnchorDetail, DocxDiffDetailOp, build_docx_anchor_detail_lookup
 
 
 MISSING_SIDE_PLACEHOLDER = "(此版本无对应内容)"
@@ -32,15 +35,33 @@ class _DetailShardPlan:
     chapter_title: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class _DocxMoveInfo:
+    paired_anchor_id: str
+    role: str
+    moved_text: str
+    source_location: str
+    target_location: str
+
+
 def build_markdown_bundle(
     job_id: str,
     result: DiffResult,
     *,
     detail_shard_size: int = DEFAULT_DETAIL_SHARD_SIZE,
     representative_limit: int = DEFAULT_REPRESENTATIVE_LIMIT,
+    source_document_path: str | Path | None = None,
+    modified_document_path: str | Path | None = None,
 ) -> MarkdownBundle:
     non_reflow_anchors = [anchor for anchor in result.anchors if anchor.kind != "reflow"]
     chapter_mode, chapter_lookup = _resolve_chapter_mode(result, non_reflow_anchors)
+    docx_anchor_details = _build_docx_anchor_details(
+        result,
+        anchors=non_reflow_anchors,
+        source_document_path=source_document_path,
+        modified_document_path=modified_document_path,
+    )
+    docx_move_lookup = _build_docx_move_lookup(non_reflow_anchors, docx_anchor_details)
     detail_plans = _build_detail_plans(
         non_reflow_anchors,
         chapter_lookup=chapter_lookup,
@@ -50,7 +71,12 @@ def build_markdown_bundle(
     detail_files = [
         MarkdownBundleFile(
             name=plan.name,
-            content=_render_detail_file(job_id, plan),
+            content=_render_detail_file(
+                job_id,
+                plan,
+                docx_anchor_details=docx_anchor_details,
+                docx_move_lookup=docx_move_lookup,
+            ),
         )
         for plan in detail_plans
     ]
@@ -65,6 +91,83 @@ def build_markdown_bundle(
         ),
     )
     return MarkdownBundle(files=[overview_file, *detail_files])
+
+
+def _build_docx_anchor_details(
+    result: DiffResult,
+    *,
+    anchors: list[DiffAnchor],
+    source_document_path: str | Path | None,
+    modified_document_path: str | Path | None,
+) -> dict[str, DocxAnchorDetail] | None:
+    if result.document_kind != "docx":
+        return None
+    if source_document_path is None or modified_document_path is None:
+        return None
+    return build_docx_anchor_detail_lookup(source_document_path, modified_document_path, anchors)
+
+
+def _build_docx_move_lookup(
+    anchors: list[DiffAnchor],
+    docx_anchor_details: dict[str, DocxAnchorDetail] | None,
+) -> dict[str, _DocxMoveInfo]:
+    if not docx_anchor_details:
+        return {}
+
+    ordered = list(enumerate(anchors))
+    inserts = [
+        (index, anchor, docx_anchor_details[anchor.id])
+        for index, anchor in ordered
+        if anchor.kind == "insert" and anchor.id in docx_anchor_details
+    ]
+    used_insert_ids: set[str] = set()
+    move_lookup: dict[str, _DocxMoveInfo] = {}
+
+    for delete_index, delete_anchor in ordered:
+        if delete_anchor.kind != "delete" or delete_anchor.id not in docx_anchor_details:
+            continue
+        delete_detail = docx_anchor_details[delete_anchor.id]
+        delete_text = delete_detail.left_text.strip()
+        if not delete_text:
+            continue
+
+        match: tuple[int, DiffAnchor, DocxAnchorDetail] | None = None
+        for insert_index, insert_anchor, insert_detail in inserts:
+            if insert_anchor.id in used_insert_ids:
+                continue
+            if insert_anchor.source_type != delete_anchor.source_type:
+                continue
+            if insert_detail.right_text.strip() != delete_text:
+                continue
+            if insert_detail.block_kind != delete_detail.block_kind:
+                continue
+            if match is None or abs(insert_index - delete_index) < abs(match[0] - delete_index):
+                match = (insert_index, insert_anchor, insert_detail)
+
+        if match is None:
+            continue
+
+        _, insert_anchor, insert_detail = match
+        used_insert_ids.add(insert_anchor.id)
+        source_location = _page_label(delete_anchor.left_fragments)
+        target_location = _page_label(insert_anchor.right_fragments)
+        moved_text = delete_text
+        move_lookup[delete_anchor.id] = _DocxMoveInfo(
+            paired_anchor_id=insert_anchor.id,
+            role="source",
+            moved_text=moved_text,
+            source_location=source_location,
+            target_location=target_location,
+        )
+        move_lookup[insert_anchor.id] = _DocxMoveInfo(
+            paired_anchor_id=delete_anchor.id,
+            role="target",
+            moved_text=insert_detail.right_text.strip(),
+            source_location=source_location,
+            target_location=target_location,
+        )
+
+    return move_lookup
 
 
 def _resolve_chapter_mode(
@@ -196,7 +299,13 @@ def _render_overview_file(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _render_detail_file(job_id: str, plan: _DetailShardPlan) -> str:
+def _render_detail_file(
+    job_id: str,
+    plan: _DetailShardPlan,
+    *,
+    docx_anchor_details: dict[str, DocxAnchorDetail] | None,
+    docx_move_lookup: dict[str, _DocxMoveInfo],
+) -> str:
     title = plan.chapter_title or plan.name.removesuffix(".md")
     lines = [
         _render_front_matter(
@@ -212,7 +321,15 @@ def _render_detail_file(job_id: str, plan: _DetailShardPlan) -> str:
 
     for index, anchor in enumerate(plan.anchors, start=1):
         lines.extend(["", f"## {index}. {anchor.id}"])
-        if anchor.source_type == "table":
+        if docx_anchor_details and anchor.id in docx_anchor_details:
+            lines.extend(
+                _render_docx_anchor(
+                    anchor,
+                    docx_anchor_details[anchor.id],
+                    move_info=docx_move_lookup.get(anchor.id),
+                )
+            )
+        elif anchor.source_type == "table":
             lines.extend(_render_table_anchor(anchor))
         else:
             lines.extend(_render_text_anchor(anchor))
@@ -243,6 +360,104 @@ def _render_table_anchor(anchor: DiffAnchor) -> list[str]:
         f"{MODIFIED_DOCUMENT_LABEL}页码：{_page_label(anchor.right_fragments)}",
         f"多次编辑合并：{'是' if anchor.raw_event_count > 1 else '否'}",
     ]
+
+
+def _render_docx_anchor(
+    anchor: DiffAnchor,
+    detail: DocxAnchorDetail,
+    *,
+    move_info: _DocxMoveInfo | None,
+) -> list[str]:
+    left_full_text = detail.left_text or (move_info.moved_text if move_info else _missing_document_placeholder(ORIGINAL_DOCUMENT_LABEL))
+    right_full_text = detail.right_text or (move_info.moved_text if move_info else _missing_document_placeholder(MODIFIED_DOCUMENT_LABEL))
+    lines = []
+    if anchor.source_type == "table":
+        lines.append(_docx_table_change_summary(anchor, detail))
+    lines.extend(
+        [
+            f"块类型：{_docx_block_kind_label(detail.block_kind)}",
+            f"变更类型：{anchor.kind}",
+            f"置信度：{anchor.confidence}",
+            f"章节：{anchor.chapter_title or '(无章节)'}",
+            f"{ORIGINAL_DOCUMENT_LABEL}位置：{_page_label(anchor.left_fragments)}",
+            f"{MODIFIED_DOCUMENT_LABEL}位置：{_page_label(anchor.right_fragments)}",
+            f"{ORIGINAL_DOCUMENT_LABEL}全文：{left_full_text}",
+            f"{MODIFIED_DOCUMENT_LABEL}全文：{right_full_text}",
+            "差异明细：",
+        ]
+    )
+    lines.extend(_render_docx_diff_operations(detail.operations, move_info=move_info))
+    lines.append(f"多次编辑合并：{'是' if anchor.raw_event_count > 1 else '否'}")
+    return lines
+
+
+def _docx_block_kind_label(block_kind: str) -> str:
+    return {
+        "heading": "标题",
+        "paragraph": "段落",
+        "table-cell": "表格单元格",
+        "table": "表格",
+    }.get(block_kind, block_kind)
+
+
+def _render_docx_diff_operations(
+    operations: list[DocxDiffDetailOp],
+    *,
+    move_info: _DocxMoveInfo | None,
+) -> list[str]:
+    if move_info is not None:
+        if move_info.role == "source":
+            return [
+                f"- 位置移动：文本内容未改写，与 {move_info.paired_anchor_id} 配对后判定为移动，"
+                f"从 {move_info.source_location} 移动到 {move_info.target_location}。"
+            ]
+        return [
+            f"- 位置移动：文本内容未改写，与 {move_info.paired_anchor_id} 配对后判定为移动，"
+            f"由 {move_info.source_location} 移动到 {move_info.target_location}。"
+        ]
+
+    if not operations:
+        return ["- 当前节点没有可展开的逐项文本改写，差异主要体现在结构或定位。"]
+
+    lines: list[str] = []
+    for operation in operations:
+        if operation.kind == "replace":
+            lines.append(
+                f"- 替换：{json.dumps(operation.left_text, ensure_ascii=False)} -> {json.dumps(operation.right_text, ensure_ascii=False)}"
+            )
+        elif operation.kind == "delete":
+            lines.append(f"- 删除：{json.dumps(operation.left_text, ensure_ascii=False)}")
+        elif operation.kind == "insert":
+            lines.append(f"- 新增：{json.dumps(operation.right_text, ensure_ascii=False)}")
+    return lines
+
+
+def _docx_table_change_summary(anchor: DiffAnchor, detail: DocxAnchorDetail) -> str:
+    context = anchor.table_context
+    if context and context.row == -1 and context.col == -1:
+        return "表格结构发生变化。"
+
+    col_label = _table_axis_label(context.col_label if context else None, "C", context.col if context else None)
+    row_label = _table_axis_label(context.row_label if context else None, "R", context.row if context else None)
+    left_text = detail.left_text or _missing_document_placeholder(ORIGINAL_DOCUMENT_LABEL)
+    right_text = detail.right_text or _missing_document_placeholder(MODIFIED_DOCUMENT_LABEL)
+
+    if anchor.kind == "insert":
+        return (
+            f"表格变更：所在列 [{col_label}]，所在行 [{row_label}]，"
+            f"原值为 {json.dumps(_missing_document_placeholder(ORIGINAL_DOCUMENT_LABEL), ensure_ascii=False)}，"
+            f"变更为 {json.dumps(right_text, ensure_ascii=False)}。"
+        )
+    if anchor.kind == "delete":
+        return (
+            f"表格变更：所在列 [{col_label}]，所在行 [{row_label}]，"
+            f"原值为 {json.dumps(left_text, ensure_ascii=False)}，"
+            f"变更为 {json.dumps(_missing_document_placeholder(MODIFIED_DOCUMENT_LABEL), ensure_ascii=False)}。"
+        )
+    return (
+        f"表格变更：所在列 [{col_label}]，所在行 [{row_label}]，原值为 {json.dumps(left_text, ensure_ascii=False)}，"
+        f"变更为 {json.dumps(right_text, ensure_ascii=False)}。"
+    )
 
 
 def _table_change_summary(anchor: DiffAnchor) -> str:
@@ -332,8 +547,27 @@ def _page_reference(anchor: DiffAnchor) -> str:
     return f"{ORIGINAL_DOCUMENT_LABEL}：{_page_label(anchor.left_fragments)}；{MODIFIED_DOCUMENT_LABEL}：{_page_label(anchor.right_fragments)}"
 
 
-def _page_label(fragments: list[object]) -> str:
-    pages = sorted({fragment.page + 1 for fragment in fragments})
+def _page_label(fragments: Sequence[HighlightFragment]) -> str:
+    if fragments and getattr(fragments[0], "kind", "pdf") == "word":
+        ranges_by_dom_id: dict[str, tuple[int | None, int | None]] = {}
+        for fragment in fragments:
+            dom_id = getattr(fragment, "dom_id", None) or "(unknown-node)"
+            char_start = getattr(fragment, "char_start", None)
+            char_end = getattr(fragment, "char_end", None)
+            current_start, current_end = ranges_by_dom_id.get(dom_id, (None, None))
+            merged_start = char_start if current_start is None else current_start if char_start is None else min(current_start, char_start)
+            merged_end = char_end if current_end is None else current_end if char_end is None else max(current_end, char_end)
+            ranges_by_dom_id[dom_id] = (merged_start, merged_end)
+
+        labels = []
+        for dom_id, (char_start, char_end) in ranges_by_dom_id.items():
+            if char_start is None or char_end is None:
+                labels.append(dom_id)
+            else:
+                labels.append(f"{dom_id}[{char_start}:{char_end}]")
+        return "节点 " + "，".join(labels)
+
+    pages = sorted({fragment.page + 1 for fragment in fragments if fragment.page is not None})
     if not pages:
         return "无"
 

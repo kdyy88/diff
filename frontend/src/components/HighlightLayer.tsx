@@ -1,4 +1,4 @@
-import type { HighlightFragment, DiffKind, PageMeta } from '../types/api';
+import type { DiffKind, PageMeta, PdfHighlightFragment } from '../types/api';
 
 const KIND_CLASS: Record<DiffKind, string> = {
   insert: 'bg-emerald-400/30 ring-1 ring-emerald-500/50',
@@ -10,7 +10,7 @@ const KIND_CLASS: Record<DiffKind, string> = {
 interface HighlightLayerProps {
   page: PageMeta;
   renderedWidth: number;
-  fragments: Array<HighlightFragment & { anchorId: string; kind: DiffKind; active: boolean }>;
+  fragments: Array<PdfHighlightFragment & { anchorId: string; diffKind: DiffKind; active: boolean }>;
   onSelect: (anchorId: string) => void;
 }
 
@@ -33,7 +33,7 @@ export function HighlightLayer({
         return (
           <button
             key={`${fragment.anchorId}-${fragment.viewport_ref}`}
-            className={`pointer-events-auto absolute rounded-md transition ${KIND_CLASS[fragment.kind]} ${
+            className={`pointer-events-auto absolute rounded-md transition ${KIND_CLASS[fragment.diffKind]} ${
               fragment.active ? 'opacity-100 ring-2 ring-slate-950/70' : 'opacity-45'
             }`}
             onClick={() => onSelect(fragment.anchorId)}
@@ -43,7 +43,7 @@ export function HighlightLayer({
               width: `${(x1 - x0) * scale}px`,
               height: `${(y1 - y0) * scale}px`,
             }}
-            title={fragment.kind}
+            title={fragment.diffKind}
             type="button"
           />
         );

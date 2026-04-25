@@ -32,17 +32,18 @@ export class ApiError extends Error {
 }
 
 export interface CreateJobInput {
-  sourcePdf: File;
-  modifiedPdf: File;
+  sourceFile: File;
+  modifiedFile: File;
   headerMargin: number;
   footerMargin: number;
   showReflow: boolean;
 }
 
+const DOCUMENT_KINDS = ['pdf', 'docx'] as const;
 const JOB_STATES = ['uploaded', 'extracting', 'aligning', 'projecting', 'done', 'failed'] as const;
 const CHAPTER_ANALYSIS_STATES = ['uploaded', 'analyzing', 'fallback', 'done', 'failed'] as const;
 const DIFF_KINDS = ['insert', 'delete', 'replace', 'reflow'] as const;
-const CHAPTER_SOURCES = ['bookmark', 'manual', 'synthetic'] as const;
+const CHAPTER_SOURCES = ['bookmark', 'heading', 'manual', 'synthetic'] as const;
 const CHAPTER_CONFIDENCE_LEVELS = ['high', 'medium', 'low'] as const;
 
 type JsonRecord = Record<string, unknown>;
@@ -125,6 +126,7 @@ function parseCreateJobResponse(value: unknown): CreateJobResponse {
   const record = expectRecord(value, 'Create job response');
   return {
     id: expectString(record.id, 'Create job response.id'),
+    document_kind: expectOneOf(record.document_kind, DOCUMENT_KINDS, 'Create job response.document_kind'),
     status: expectOneOf(record.status, JOB_STATES, 'Create job response.status') as JobState,
   };
 }
@@ -152,11 +154,22 @@ function parsePageMeta(value: unknown, context: string) {
 
 function parseHighlightFragment(value: unknown, context: string) {
   const record = expectRecord(value, context);
+  const kind = expectOneOf(record.kind, ['pdf', 'word'] as const, `${context}.kind`);
+  if (kind === 'word') {
+    return {
+      kind,
+      dom_id: expectString(record.dom_id, `${context}.dom_id`),
+      char_start: expectNumber(record.char_start, `${context}.char_start`),
+      char_end: expectNumber(record.char_end, `${context}.char_end`),
+    };
+  }
+
   const bbox = expectArray(record.bbox, `${context}.bbox`).map((item, index) => expectNumber(item, `${context}.bbox[${index}]`));
   if (bbox.length !== 4) {
     throw new TypeError(`${context}.bbox must contain exactly 4 numbers.`);
   }
   return {
+    kind,
     page: expectNumber(record.page, `${context}.page`),
     bbox: bbox as [number, number, number, number],
     viewport_ref: expectString(record.viewport_ref, `${context}.viewport_ref`),
@@ -223,6 +236,7 @@ function parseChapterDiffSummary(value: unknown, context: string) {
 function parseDiffResult(value: unknown): DiffResult {
   const record = expectRecord(value, 'Diff result');
   return {
+    document_kind: expectOneOf(record.document_kind, DOCUMENT_KINDS, 'Diff result.document_kind'),
     pages_left: expectArray(record.pages_left, 'Diff result.pages_left').map((item, index) => parsePageMeta(item, `Diff result.pages_left[${index}]`)),
     pages_right: expectArray(record.pages_right, 'Diff result.pages_right').map((item, index) => parsePageMeta(item, `Diff result.pages_right[${index}]`)),
     summary: parseDiffSummary(record.summary, 'Diff result.summary'),
@@ -237,6 +251,7 @@ function parseJobStatus(value: unknown): JobStatus {
   const record = expectRecord(value, 'Job status response');
   return {
     id: expectString(record.id, 'Job status response.id'),
+    document_kind: expectOneOf(record.document_kind, DOCUMENT_KINDS, 'Job status response.document_kind'),
     status: expectOneOf(record.status, JOB_STATES, 'Job status response.status') as JobState,
     stage: expectString(record.stage, 'Job status response.stage'),
     progress: expectNumber(record.progress, 'Job status response.progress'),
@@ -271,6 +286,7 @@ function parseChapterAnalysisStatus(value: unknown): ChapterAnalysisStatus {
   const record = expectRecord(value, 'Chapter analysis status response');
   return {
     id: expectString(record.id, 'Chapter analysis status response.id'),
+    document_kind: expectOneOf(record.document_kind, DOCUMENT_KINDS, 'Chapter analysis status response.document_kind'),
     status: expectOneOf(record.status, CHAPTER_ANALYSIS_STATES, 'Chapter analysis status response.status') as ChapterAnalysisState,
     stage: expectString(record.stage, 'Chapter analysis status response.stage'),
     progress: expectNumber(record.progress, 'Chapter analysis status response.progress'),
@@ -282,6 +298,7 @@ function parseChapterAnalysisResult(value: unknown): ChapterAnalysisResult {
   const record = expectRecord(value, 'Chapter analysis result');
   return {
     id: expectString(record.id, 'Chapter analysis result.id'),
+    document_kind: expectOneOf(record.document_kind, DOCUMENT_KINDS, 'Chapter analysis result.document_kind'),
     status: expectOneOf(record.status, CHAPTER_ANALYSIS_STATES, 'Chapter analysis result.status') as ChapterAnalysisState,
     source_plan: parseDocumentChapterPlan(record.source_plan, 'Chapter analysis result.source_plan'),
     modified_plan: parseDocumentChapterPlan(record.modified_plan, 'Chapter analysis result.modified_plan'),
@@ -342,8 +359,8 @@ async function readApiJson<T>(response: Response, fallbackMessage: string, parse
 
 function buildFormData(input: CreateJobInput): FormData {
   const formData = new FormData();
-  formData.append('sourcePdf', input.sourcePdf);
-  formData.append('modifiedPdf', input.modifiedPdf);
+  formData.append('sourceFile', input.sourceFile);
+  formData.append('modifiedFile', input.modifiedFile);
   formData.append('headerMargin', String(input.headerMargin));
   formData.append('footerMargin', String(input.footerMargin));
   formData.append('showReflow', String(input.showReflow));
@@ -420,10 +437,18 @@ export async function confirmChapterAnalysis(
   return readApiJson(response, 'Failed to confirm chapter plan.', parseCreateJobResponse);
 }
 
-export function buildPdfUrl(jobId: string, side: 'source' | 'modified'): string {
+export function buildJobFileUrl(jobId: string, side: 'source' | 'modified'): string {
   return `${API_BASE}/jobs/${jobId}/files/${side}`;
 }
 
-export function buildChapterAnalysisPdfUrl(analysisId: string, side: 'source' | 'modified'): string {
+export function buildJobReviewUrl(jobId: string, side: 'source' | 'modified'): string {
+  return `${API_BASE}/jobs/${jobId}/review/${side}`;
+}
+
+export function buildChapterAnalysisFileUrl(analysisId: string, side: 'source' | 'modified'): string {
   return `${API_BASE}/chapter-analyses/${analysisId}/files/${side}`;
+}
+
+export function buildChapterAnalysisReviewUrl(analysisId: string, side: 'source' | 'modified'): string {
+  return `${API_BASE}/chapter-analyses/${analysisId}/review/${side}`;
 }

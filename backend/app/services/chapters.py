@@ -12,7 +12,6 @@ import unicodedata
 from uuid import uuid4
 
 import fitz
-from fastapi import UploadFile
 
 from app.core.config import TERMINAL_RECORD_TTL_SECONDS, ensure_default_temp_dir
 from app.models.schemas import (
@@ -29,6 +28,8 @@ from app.models.schemas import (
     DiffSummary,
     DocumentChapterPlan,
 )
+from app.services.docx_outline import is_heading_one_block, load_docx_blocks
+from app.services.document_kind import UploadedDocument
 from app.services.extractor import PageInfo
 
 
@@ -63,11 +64,16 @@ class _AnalysisRecord:
     status: str
     stage: str
     progress: int
+    document_kind: str
     header_margin: float
     footer_margin: float
     include_reflow: bool
     source_path: Path
     modified_path: Path
+    source_filename: str
+    modified_filename: str
+    source_media_type: str
+    modified_media_type: str
     error: str | None = None
     result: ChapterAnalysisResult | None = None
     created_at: float = 0.0
@@ -185,14 +191,64 @@ def analyze_bookmark_plan(pdf_path: str | Path, side: str) -> DocumentChapterPla
     return _build_plan_from_candidates(side, total_pages, candidates)
 
 
-async def analyze_document_plan(pdf_path: str | Path, side: str) -> DocumentChapterPlan:
-    bookmark_plan = analyze_bookmark_plan(pdf_path, side)
-    if bookmark_plan is not None:
-        return bookmark_plan
-    raise ChapterBookmarksUnavailable(
-        f"No usable level-1 PDF bookmarks were found in the {side} document. "
-        "Continuing with the regular full-document diff instead."
-    )
+def analyze_docx_heading_plan(docx_path: str | Path, side: str) -> DocumentChapterPlan | None:
+    blocks = load_docx_blocks(docx_path)
+    total_blocks = len(blocks)
+    if total_blocks == 0:
+        return None
+
+    candidates = [
+        _ChapterCandidate(
+            text=block.text,
+            start_page=block.index,
+            source="heading",
+            confidence="high",
+        )
+        for block in blocks
+        if is_heading_one_block(block) and block.text
+    ]
+
+    if not candidates:
+        return None
+
+    if candidates[0].start_page > 0:
+        candidates.insert(
+            0,
+            _ChapterCandidate(
+                text="Front Matter",
+                start_page=0,
+                source="synthetic",
+                confidence="medium",
+            ),
+        )
+    return _build_plan_from_candidates(side, total_blocks, candidates)
+
+
+async def analyze_document_plan(
+    document_path: str | Path,
+    side: str,
+    *,
+    document_kind: str = "pdf",
+) -> DocumentChapterPlan:
+    if document_kind == "pdf":
+        bookmark_plan = analyze_bookmark_plan(document_path, side)
+        if bookmark_plan is not None:
+            return bookmark_plan
+        raise ChapterBookmarksUnavailable(
+            f"No usable level-1 PDF bookmarks were found in the {side} document. "
+            "Continuing with the regular full-document diff instead."
+        )
+
+    if document_kind == "docx":
+        heading_plan = analyze_docx_heading_plan(document_path, side)
+        if heading_plan is not None:
+            return heading_plan
+        raise ChapterBookmarksUnavailable(
+            f"No usable Heading 1 outline was found in the {side} DOCX document. "
+            "Continuing with the regular full-document diff instead."
+        )
+
+    raise ValueError(f"Unsupported document kind for chapter analysis: {document_kind}")
 
 
 def _hydrate_confirmed_plan(
@@ -482,20 +538,17 @@ class ChapterAnalysisStore:
 
     async def create_analysis(
         self,
-        source_pdf: UploadFile,
-        modified_pdf: UploadFile,
+        source_document: UploadedDocument,
+        modified_document: UploadedDocument,
         *,
         header_margin: float,
         footer_margin: float,
         include_reflow: bool,
     ) -> ChapterAnalysisStatus:
         self._cleanup_expired_analyses()
-        analysis_id = f"analysis-{uuid4().hex}"
-        analysis_dir = Path(mkdtemp(prefix=f"{analysis_id}-", dir=ensure_default_temp_dir()))
-        source_path = analysis_dir / "source.pdf"
-        modified_path = analysis_dir / "modified.pdf"
-        await self._write_upload(source_pdf, source_path)
-        await self._write_upload(modified_pdf, modified_path)
+        analysis_id, source_path, modified_path = self._prepare_analysis_paths(source_document, modified_document)
+        self._write_upload(source_document.content, source_path)
+        self._write_upload(modified_document.content, modified_path)
         timestamp = monotonic()
 
         record = _AnalysisRecord(
@@ -503,22 +556,45 @@ class ChapterAnalysisStore:
             status="uploaded",
             stage="uploaded",
             progress=0,
+            document_kind=source_document.kind,
             header_margin=header_margin,
             footer_margin=footer_margin,
             include_reflow=include_reflow,
             source_path=source_path,
             modified_path=modified_path,
+            source_filename=source_document.filename,
+            modified_filename=modified_document.filename,
+            source_media_type=source_document.media_type,
+            modified_media_type=modified_document.media_type,
             created_at=timestamp,
             last_accessed_at=timestamp,
         )
         self._analyses[analysis_id] = record
         asyncio.create_task(self._run_analysis(analysis_id))
-        return ChapterAnalysisStatus(id=analysis_id, status="uploaded", stage="uploaded", progress=0, error=None)
+        return ChapterAnalysisStatus(
+            id=analysis_id,
+            document_kind=source_document.kind,
+            status="uploaded",
+            stage="uploaded",
+            progress=0,
+            error=None,
+        )
 
-    async def _write_upload(self, upload: UploadFile, path: Path) -> None:
-        content = await upload.read()
+    def _prepare_analysis_paths(
+        self,
+        source_document: UploadedDocument,
+        modified_document: UploadedDocument,
+    ) -> tuple[str, Path, Path]:
+        analysis_id = f"analysis-{uuid4().hex}"
+        analysis_dir = Path(mkdtemp(prefix=f"{analysis_id}-", dir=ensure_default_temp_dir()))
+        return (
+            analysis_id,
+            analysis_dir / f"source{source_document.suffix}",
+            analysis_dir / f"modified{modified_document.suffix}",
+        )
+
+    def _write_upload(self, content: bytes, path: Path) -> None:
         path.write_bytes(content)
-        await upload.close()
 
     async def _run_analysis(self, analysis_id: str) -> None:
         record = self._analyses[analysis_id]
@@ -526,14 +602,23 @@ class ChapterAnalysisStore:
             record.status = "analyzing"
             record.stage = "analyzing source chapters"
             record.progress = 10
-            source_plan = await analyze_document_plan(record.source_path, "source")
+            source_plan = await analyze_document_plan(
+                record.source_path,
+                "source",
+                document_kind=record.document_kind,
+            )
 
             record.stage = "analyzing modified chapters"
             record.progress = 55
-            modified_plan = await analyze_document_plan(record.modified_path, "modified")
+            modified_plan = await analyze_document_plan(
+                record.modified_path,
+                "modified",
+                document_kind=record.document_kind,
+            )
 
             record.result = ChapterAnalysisResult(
                 id=record.id,
+                document_kind=record.document_kind,
                 status="done",
                 source_plan=source_plan,
                 modified_plan=modified_plan,
@@ -558,6 +643,7 @@ class ChapterAnalysisStore:
         self._touch_analysis(record)
         return ChapterAnalysisStatus(
             id=record.id,
+            document_kind=record.document_kind,
             status=record.status,
             stage=record.stage,
             progress=record.progress,
@@ -582,6 +668,28 @@ class ChapterAnalysisStore:
             return record.modified_path
         raise ValueError(f"Unsupported file side: {side}")
 
+    def get_file_metadata(self, analysis_id: str, side: str) -> tuple[Path, str, str]:
+        self._cleanup_expired_analyses()
+        record = self._analyses[analysis_id]
+        self._touch_analysis(record)
+        if side == "source":
+            return record.source_path, record.source_media_type, record.source_filename
+        if side == "modified":
+            return record.modified_path, record.modified_media_type, record.modified_filename
+        raise ValueError(f"Unsupported file side: {side}")
+
+    def get_review_html(self, analysis_id: str, side: str) -> str:
+        self._cleanup_expired_analyses()
+        record = self._analyses[analysis_id]
+        self._touch_analysis(record)
+        if record.document_kind != "docx":
+            raise ValueError("Review HTML is only available for DOCX chapter analyses.")
+        path = record.source_path if side == "source" else record.modified_path if side == "modified" else None
+        if path is None:
+            raise ValueError(f"Unsupported file side: {side}")
+        projection = extract_document(path, header_margin=record.header_margin, footer_margin=record.footer_margin)
+        return projection.review_html or ""
+
     def validate(self, analysis_id: str, payload: ChapterValidationRequest) -> ChapterValidationResult:
         result = self.get_result(analysis_id)
         return validate_chapter_match(
@@ -599,9 +707,14 @@ class ChapterAnalysisStore:
         return await create_job_from_paths(
             record.source_path,
             record.modified_path,
+            document_kind=record.document_kind,
             header_margin=record.header_margin,
             footer_margin=record.footer_margin,
             include_reflow=record.include_reflow,
+            source_filename=record.source_filename,
+            modified_filename=record.modified_filename,
+            source_media_type=record.source_media_type,
+            modified_media_type=record.modified_media_type,
             chapter_pairs=build_execution_pairs(validation),
         )
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Document, Page } from 'react-pdf';
 
-import type { DiffAnchor, DiffKind, PageMeta } from '../types/api';
+import type { DiffAnchor, DiffKind, PageMeta, PdfHighlightFragment } from '../types/api';
 import { HighlightLayer } from './HighlightLayer';
 
 interface PdfPaneProps {
@@ -80,7 +80,9 @@ export function PdfPane({
     if (!activeAnchor) {
       return;
     }
-    const fragments = side === 'left' ? activeAnchor.left_fragments : activeAnchor.right_fragments;
+    const fragments = (side === 'left' ? activeAnchor.left_fragments : activeAnchor.right_fragments).filter(
+      (fragment): fragment is PdfHighlightFragment => fragment.kind === 'pdf',
+    );
     const targetPage = fragments[0]?.page;
     const paneNode = paneRef.current;
     if (targetPage === undefined || !paneNode) {
@@ -109,15 +111,17 @@ export function PdfPane({
   }, [pageLayouts, viewport.height, viewport.scrollTop]);
 
   const fragmentsByPage = useMemo(() => {
-    const next = new Map<number, Array<{ anchorId: string; page: number; viewport_ref: string; bbox: [number, number, number, number]; kind: DiffKind; active: boolean }>>();
+    const next = new Map<number, Array<{ anchorId: string; page: number; viewport_ref: string; bbox: [number, number, number, number]; diffKind: DiffKind; active: boolean; kind: 'pdf' }>>();
     anchors.forEach((anchor) => {
-      const fragments = side === 'left' ? anchor.left_fragments : anchor.right_fragments;
+      const fragments = (side === 'left' ? anchor.left_fragments : anchor.right_fragments).filter(
+        (fragment): fragment is PdfHighlightFragment => fragment.kind === 'pdf',
+      );
       fragments.forEach((fragment) => {
         const list = next.get(fragment.page) ?? [];
         list.push({
           ...fragment,
           anchorId: anchor.id,
-          kind: anchor.kind,
+          diffKind: anchor.kind,
           active: anchor.id === activeAnchorId,
         });
         next.set(fragment.page, list);

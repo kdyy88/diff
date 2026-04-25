@@ -1,7 +1,9 @@
+export type DocumentKind = 'pdf' | 'docx';
+export type HighlightKind = 'pdf' | 'word';
 export type DiffKind = 'insert' | 'delete' | 'replace' | 'reflow';
 export type ConfidenceLevel = 'high' | 'low';
 export type ChapterConfidenceLevel = 'high' | 'medium' | 'low';
-export type ChapterSource = 'bookmark' | 'manual' | 'synthetic';
+export type ChapterSource = 'bookmark' | 'heading' | 'manual' | 'synthetic';
 export type JobState = 'uploaded' | 'extracting' | 'aligning' | 'projecting' | 'done' | 'failed';
 export type ChapterAnalysisState = 'uploaded' | 'analyzing' | 'fallback' | 'done' | 'failed';
 export type AnalysisSide = 'source' | 'modified';
@@ -10,11 +12,21 @@ export interface FeatureFlags {
   chapterSplit: boolean;
 }
 
-export interface HighlightFragment {
+export interface PdfHighlightFragment {
+  kind: 'pdf';
   page: number;
   bbox: [number, number, number, number];
   viewport_ref: string;
 }
+
+export interface WordHighlightFragment {
+  kind: 'word';
+  dom_id: string;
+  char_start: number;
+  char_end: number;
+}
+
+export type HighlightFragment = PdfHighlightFragment | WordHighlightFragment;
 
 export interface CharRange {
   start: number;
@@ -73,6 +85,7 @@ export interface ChapterDiffSummary {
 }
 
 export interface DiffResult {
+  document_kind: DocumentKind;
   pages_left: PageMeta[];
   pages_right: PageMeta[];
   summary: DiffSummary;
@@ -82,6 +95,7 @@ export interface DiffResult {
 
 export interface JobStatus {
   id: string;
+  document_kind: DocumentKind;
   status: JobState;
   stage: string;
   progress: number;
@@ -91,6 +105,7 @@ export interface JobStatus {
 
 export interface CreateJobResponse {
   id: string;
+  document_kind: DocumentKind;
   status: JobState;
 }
 
@@ -112,6 +127,7 @@ export interface DocumentChapterPlan {
 
 export interface ChapterAnalysisStatus {
   id: string;
+  document_kind: DocumentKind;
   status: ChapterAnalysisState;
   stage: string;
   progress: number;
@@ -120,6 +136,7 @@ export interface ChapterAnalysisStatus {
 
 export interface ChapterAnalysisResult {
   id: string;
+  document_kind: DocumentKind;
   status: ChapterAnalysisState;
   source_plan: DocumentChapterPlan;
   modified_plan: DocumentChapterPlan;

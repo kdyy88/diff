@@ -1,8 +1,9 @@
 import { useMemo } from 'react';
 
-import { buildPdfUrl } from '../api/client';
+import { buildJobFileUrl, buildJobReviewUrl } from '../api/client';
 import { ControlBar } from '../components/ControlBar';
 import { DiffList } from '../components/DiffList';
+import { HtmlPane } from '../components/HtmlPane';
 import { PdfPane } from '../components/PdfPane';
 import type { DiffResult } from '../types/api';
 
@@ -46,6 +47,7 @@ export function ReviewPage({
     0,
     visibleAnchors.findIndex((anchor) => anchor.id === activeAnchorId),
   );
+  const allowReflow = result.document_kind === 'pdf';
 
   return (
     <main className="min-h-screen px-5 py-5">
@@ -53,7 +55,7 @@ export function ReviewPage({
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.28em] text-slate-500">Review Workspace</p>
           <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-950">
-            Dual-pane audit review
+            {result.document_kind === 'pdf' ? 'Dual-pane audit review' : 'Dual-pane Word review'}
           </h1>
         </div>
         <div className="rounded-[28px] border border-slate-200/70 bg-white/85 px-5 py-4 shadow-lg shadow-slate-200/40 backdrop-blur">
@@ -99,35 +101,58 @@ export function ReviewPage({
       ) : null}
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px_minmax(0,1fr)]">
-        <PdfPane
-          title="Left Pane"
-          side="left"
-          fileUrl={buildPdfUrl(jobId, 'source')}
-          pages={result.pages_left}
-          anchors={visibleAnchors}
-          activeAnchorId={activeAnchorId}
-          onSelectAnchor={onSelectAnchor}
-        />
+        {result.document_kind === 'pdf' ? (
+          <PdfPane
+            title="Left Pane"
+            side="left"
+            fileUrl={buildJobFileUrl(jobId, 'source')}
+            pages={result.pages_left}
+            anchors={visibleAnchors}
+            activeAnchorId={activeAnchorId}
+            onSelectAnchor={onSelectAnchor}
+          />
+        ) : (
+          <HtmlPane
+            title="Left Pane"
+            side="left"
+            reviewUrl={buildJobReviewUrl(jobId, 'source')}
+            anchors={visibleAnchors}
+            activeAnchorId={activeAnchorId}
+            onSelectAnchor={onSelectAnchor}
+          />
+        )}
         <div className="space-y-5">
           <ControlBar
+            allowReflow={allowReflow}
             currentIndex={currentIndex}
             total={visibleAnchors.length}
-            showReflow={showReflow}
+            showReflow={allowReflow ? showReflow : false}
             onToggleReflow={onToggleReflow}
             onPrevious={onPrevious}
             onNext={onNext}
           />
           <DiffList anchors={visibleAnchors} activeAnchorId={activeAnchorId} onSelect={onSelectAnchor} />
         </div>
-        <PdfPane
-          title="Right Pane"
-          side="right"
-          fileUrl={buildPdfUrl(jobId, 'modified')}
-          pages={result.pages_right}
-          anchors={visibleAnchors}
-          activeAnchorId={activeAnchorId}
-          onSelectAnchor={onSelectAnchor}
-        />
+        {result.document_kind === 'pdf' ? (
+          <PdfPane
+            title="Right Pane"
+            side="right"
+            fileUrl={buildJobFileUrl(jobId, 'modified')}
+            pages={result.pages_right}
+            anchors={visibleAnchors}
+            activeAnchorId={activeAnchorId}
+            onSelectAnchor={onSelectAnchor}
+          />
+        ) : (
+          <HtmlPane
+            title="Right Pane"
+            side="right"
+            reviewUrl={buildJobReviewUrl(jobId, 'modified')}
+            anchors={visibleAnchors}
+            activeAnchorId={activeAnchorId}
+            onSelectAnchor={onSelectAnchor}
+          />
+        )}
       </div>
     </main>
   );

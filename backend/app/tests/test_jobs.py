@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from app.models.schemas import DiffAnchor, DiffResult, DiffSummary, PageMeta
+from app.services.document_kind import UploadedDocument
 from app.services.jobs import JobStore
 
 
@@ -37,3 +38,28 @@ def test_job_store_persists_markdown_bundle(monkeypatch, tmp_path: Path) -> None
     assert 'original_document_label: "原文档"' in overview
     assert "原句包含足够的上下文信息。" in detail
     assert "原文档片段：原句包含足够的上下文信息。" in detail
+
+
+def test_prepare_job_paths_preserves_detected_suffixes() -> None:
+    store = JobStore()
+
+    job_id, source_path, modified_path = store._prepare_job_paths(
+        UploadedDocument(
+            filename="source.docx",
+            content=b"docx",
+            kind="docx",
+            suffix=".docx",
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
+        UploadedDocument(
+            filename="modified.docx",
+            content=b"docx",
+            kind="docx",
+            suffix=".docx",
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
+    )
+
+    assert job_id.startswith("job-")
+    assert source_path.name == "source.docx"
+    assert modified_path.name == "modified.docx"

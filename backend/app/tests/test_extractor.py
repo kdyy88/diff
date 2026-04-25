@@ -1,6 +1,7 @@
 from pathlib import Path
 import tempfile
 
+from docx import Document as DocxDocument
 import fitz
 
 from app.services.extractor import extract_document
@@ -70,3 +71,26 @@ def test_should_keep_extracted_char_filters_control_chars() -> None:
     assert _should_keep_extracted_char("A")
     assert _should_keep_extracted_char(" ")
     assert not _should_keep_extracted_char("\x01")
+
+
+def test_extract_document_builds_docx_projection_without_table_text_duplication() -> None:
+    path = Path(tempfile.gettempdir()) / "extractor-docx-test.docx"
+    document = DocxDocument()
+    document.add_paragraph("Heading One", style="Heading 1")
+    document.add_paragraph("Paragraph body text")
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "A1"
+    table.cell(0, 1).text = "B1"
+    document.save(path)
+
+    projection = extract_document(path, header_margin=0, footer_margin=0)
+
+    assert projection.document_kind == "docx"
+    assert projection.pages == []
+    assert "Heading One" in projection.raw_text
+    assert "Paragraph body text" in projection.raw_text
+    assert "A1" not in projection.raw_text
+    assert len(projection.tables) == 1
+    assert projection.tables[0].cells[0].dom_id == "table-2-r0-c0"
+    assert projection.review_html is not None
+    assert 'data-dom-id="heading-0"' in projection.review_html

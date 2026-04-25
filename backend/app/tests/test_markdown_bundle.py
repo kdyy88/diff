@@ -1,4 +1,11 @@
+from pathlib import Path
+import tempfile
+
+from docx import Document as DocxDocument
+
 from app.models.schemas import ChapterDiffSummary, DiffAnchor, DiffResult, DiffSummary, HighlightFragment, PageMeta, TableContext
+from app.services.differ import compare_documents
+from app.services.extractor import extract_document
 from app.services.markdown_bundle import MISSING_SIDE_PLACEHOLDER, build_markdown_bundle
 
 
@@ -10,8 +17,10 @@ def _build_result(
     anchors: list[DiffAnchor],
     *,
     chapters: list[ChapterDiffSummary] | None = None,
+    document_kind: str = "pdf",
 ) -> DiffResult:
     return DiffResult(
+        document_kind=document_kind,
         pages_left=[PageMeta(page=index, width=600.0, height=800.0) for index in range(3)],
         pages_right=[PageMeta(page=index, width=600.0, height=800.0) for index in range(3)],
         summary=DiffSummary(
@@ -25,6 +34,12 @@ def _build_result(
         anchors=anchors,
         chapters=chapters or [],
     )
+
+
+def _compare_docx(left_path: Path, right_path: Path) -> DiffResult:
+    left = extract_document(left_path, header_margin=0, footer_margin=0)
+    right = extract_document(right_path, header_margin=0, footer_margin=0)
+    return compare_documents(left, right, include_reflow=False)
 
 
 def test_build_markdown_bundle_uses_part_mode_and_missing_side_placeholder() -> None:
@@ -251,3 +266,141 @@ def test_build_markdown_bundle_uses_document_role_labels_in_overview_and_detail(
     assert "原文档：旧文本 | 修订后文档：新文本" in overview
     assert "原文档片段：旧文本" in detail
     assert "修订后文档片段：新文本" in detail
+
+
+def test_build_markdown_bundle_renders_docx_text_diff_details() -> None:
+    left_path = Path(tempfile.gettempdir()) / "bundle-left.docx"
+    right_path = Path(tempfile.gettempdir()) / "bundle-right.docx"
+
+    left_doc = DocxDocument()
+    left_doc.add_heading("概述", level=1)
+    left_doc.add_paragraph("该药物对肿瘤细胞增殖具有明显抑制作用，且安全性良好。")
+    left_doc.save(left_path)
+
+    right_doc = DocxDocument()
+    right_doc.add_heading("概述", level=1)
+    right_doc.add_paragraph("该药物对肿瘤细胞增殖具有明显促进作用，且安全性良好。")
+    right_doc.save(right_path)
+
+    result = _compare_docx(left_path, right_path)
+    bundle = build_markdown_bundle(
+        "job-docx-1",
+        result,
+        source_document_path=left_path,
+        modified_document_path=right_path,
+    )
+    detail = bundle.files[1].content
+
+    assert "块类型：段落" in detail
+    assert "原文档位置：节点 paragraph-1" in detail
+    assert "修订后文档位置：节点 paragraph-1" in detail
+    assert "原文档全文：该药物对肿瘤细胞增殖具有明显抑制作用，且安全性良好。" in detail
+    assert "修订后文档全文：该药物对肿瘤细胞增殖具有明显促进作用，且安全性良好。" in detail
+    assert "差异明细：" in detail
+    assert "替换：" in detail
+    assert "抑制" in detail
+    assert "促进" in detail
+
+
+def test_build_markdown_bundle_renders_docx_insert_with_placeholder() -> None:
+    left_path = Path(tempfile.gettempdir()) / "bundle-insert-left.docx"
+    right_path = Path(tempfile.gettempdir()) / "bundle-insert-right.docx"
+
+    left_doc = DocxDocument()
+    left_doc.add_heading("概述", level=1)
+    left_doc.add_paragraph("现有内容。")
+    left_doc.save(left_path)
+
+    right_doc = DocxDocument()
+    right_doc.add_heading("概述", level=1)
+    right_doc.add_paragraph("现有内容。")
+    right_doc.add_paragraph("新增的风险说明。")
+    right_doc.save(right_path)
+
+    result = _compare_docx(left_path, right_path)
+    bundle = build_markdown_bundle(
+        "job-docx-2",
+        result,
+        source_document_path=left_path,
+        modified_document_path=right_path,
+    )
+    detail = bundle.files[1].content
+
+    assert "原文档全文：（原文档无对应内容）" in detail
+    assert "修订后文档全文：新增的风险说明。" in detail
+    assert "- 新增：\"新增的风险说明。\"" in detail
+
+
+def test_build_markdown_bundle_marks_docx_moved_paragraph_as_position_change() -> None:
+    left_path = Path(tempfile.gettempdir()) / "bundle-move-left.docx"
+    right_path = Path(tempfile.gettempdir()) / "bundle-move-right.docx"
+
+    moved_paragraph = "- 提取层拆成适配器：PDF 继续走现有 extractor/projector；DOCX 新增 DocxProjection。"
+
+    left_doc = DocxDocument()
+    left_doc.add_paragraph("摘要")
+    left_doc.add_paragraph("保留现有 PDF 链路。")
+    left_doc.add_paragraph(moved_paragraph)
+    left_doc.add_paragraph("接口保持兼容。")
+    left_doc.add_paragraph("测试覆盖需要补齐。")
+    left_doc.save(left_path)
+
+    right_doc = DocxDocument()
+    right_doc.add_paragraph("摘要")
+    right_doc.add_paragraph("保留现有 PDF 链路。")
+    right_doc.add_paragraph("接口保持兼容。")
+    right_doc.add_paragraph("测试覆盖需要补齐。")
+    right_doc.add_paragraph(moved_paragraph)
+    right_doc.save(right_path)
+
+    result = _compare_docx(left_path, right_path)
+    bundle = build_markdown_bundle(
+        "job-docx-move",
+        result,
+        source_document_path=left_path,
+        modified_document_path=right_path,
+    )
+    detail = bundle.files[1].content
+
+    assert "位置移动：文本内容未改写" in detail
+    assert "与 anchor-text-1 配对后判定为移动" in detail or "与 anchor-text-0 配对后判定为移动" in detail
+    assert "原文档位置：节点 paragraph-2[0:" in detail
+    assert "修订后文档位置：节点 paragraph-4[0:" in detail
+    assert "原文档全文：- 提取层拆成适配器：PDF 继续走现有 extractor/projector；DOCX 新增 DocxProjection。" in detail
+    assert "修订后文档全文：- 提取层拆成适配器：PDF 继续走现有 extractor/projector；DOCX 新增 DocxProjection。" in detail
+
+
+def test_build_markdown_bundle_renders_docx_table_diff_details() -> None:
+    left_path = Path(tempfile.gettempdir()) / "bundle-table-left.docx"
+    right_path = Path(tempfile.gettempdir()) / "bundle-table-right.docx"
+
+    left_doc = DocxDocument()
+    left_table = left_doc.add_table(rows=2, cols=2)
+    left_table.cell(0, 0).text = "药物"
+    left_table.cell(0, 1).text = "结果"
+    left_table.cell(1, 0).text = "Zanubrutinib"
+    left_table.cell(1, 1).text = "1.2"
+    left_doc.save(left_path)
+
+    right_doc = DocxDocument()
+    right_table = right_doc.add_table(rows=2, cols=2)
+    right_table.cell(0, 0).text = "药物"
+    right_table.cell(0, 1).text = "结果"
+    right_table.cell(1, 0).text = "Zanubrutinib"
+    right_table.cell(1, 1).text = "0.8"
+    right_doc.save(right_path)
+
+    result = _compare_docx(left_path, right_path)
+    bundle = build_markdown_bundle(
+        "job-docx-3",
+        result,
+        source_document_path=left_path,
+        modified_document_path=right_path,
+    )
+    detail = bundle.files[1].content
+
+    assert "块类型：表格单元格" in detail
+    assert "表格变更：所在列 [结果]，所在行 [Zanubrutinib]，原值为 \"1.2\"，变更为 \"0.8\"。" in detail
+    assert "原文档全文：1.2" in detail
+    assert "修订后文档全文：0.8" in detail
+    assert "替换：\"1.2\" -> \"0.8\"" in detail

@@ -3,7 +3,7 @@ import { Document, Page } from 'react-pdf';
 
 import {
   ApiError,
-  buildChapterAnalysisPdfUrl,
+  buildChapterAnalysisFileUrl,
   confirmChapterAnalysis,
   validateChapterAnalysis,
 } from '../api/client';
@@ -218,25 +218,30 @@ export function ChapterConfirmPage({ analysisId, result, onConfirmed, onCancel }
               <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Chapter Confirmation</p>
               <h1 className="mt-2 text-3xl font-semibold text-slate-950">Review bookmark chapters</h1>
               <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
-                Review the detected bookmark outline, fix titles or starting pages if needed, and continue when both sides match.
-                PDF preview stays off the main page and opens only when you need it.
+                {result.document_kind === 'pdf'
+                  ? 'Review the detected bookmark outline, fix titles or starting pages if needed, and continue when both sides match. PDF preview stays off the main page and opens only when you need it.'
+                  : 'Review the detected Heading 1 outline, adjust titles or starting block indexes if needed, and continue when both sides match.'}
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <button
-                className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
-                onClick={() => setPreviewState({ side: 'source', focusPage: 0 })}
-                type="button"
-              >
-                View source PDF
-              </button>
-              <button
-                className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
-                onClick={() => setPreviewState({ side: 'modified', focusPage: 0 })}
-                type="button"
-              >
-                View modified PDF
-              </button>
+              {result.document_kind === 'pdf' ? (
+                <>
+                  <button
+                    className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
+                    onClick={() => setPreviewState({ side: 'source', focusPage: 0 })}
+                    type="button"
+                  >
+                    View source PDF
+                  </button>
+                  <button
+                    className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
+                    onClick={() => setPreviewState({ side: 'modified', focusPage: 0 })}
+                    type="button"
+                  >
+                    View modified PDF
+                  </button>
+                </>
+              ) : null}
               <button
                 className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
                 onClick={onCancel}
@@ -287,6 +292,7 @@ export function ChapterConfirmPage({ analysisId, result, onConfirmed, onCancel }
         <div className="grid gap-5 xl:grid-cols-2">
           <ChapterEditorPanel
             chapters={sourceChapters}
+            documentKind={result.document_kind}
             label="Source chapters"
             onAddChapter={() => handleAddChapter('source')}
             onDeleteChapter={(chapterId) => handleDeleteChapter('source', chapterId)}
@@ -297,6 +303,7 @@ export function ChapterConfirmPage({ analysisId, result, onConfirmed, onCancel }
           />
           <ChapterEditorPanel
             chapters={modifiedChapters}
+            documentKind={result.document_kind}
             label="Modified chapters"
             onAddChapter={() => handleAddChapter('modified')}
             onDeleteChapter={(chapterId) => handleDeleteChapter('modified', chapterId)}
@@ -310,7 +317,7 @@ export function ChapterConfirmPage({ analysisId, result, onConfirmed, onCancel }
 
       {previewState ? (
         <PdfPreviewModal
-          fileUrl={buildChapterAnalysisPdfUrl(analysisId, previewState.side)}
+          fileUrl={buildChapterAnalysisFileUrl(analysisId, previewState.side)}
           focusedPage={previewState.focusPage}
           onClose={() => setPreviewState(null)}
           pageCount={previewState.side === 'source' ? result.source_plan.total_pages : result.modified_plan.total_pages}
@@ -340,6 +347,7 @@ function ValidationIssueCard({ issue }: { issue: ChapterValidationIssue }) {
 }
 
 function ChapterEditorPanel({
+  documentKind,
   label,
   side,
   chapters,
@@ -349,6 +357,7 @@ function ChapterEditorPanel({
   onAddChapter,
   onPreviewPage,
 }: {
+  documentKind: 'pdf' | 'docx';
   label: string;
   side: AnalysisSide;
   chapters: EditableChapter[];
@@ -384,13 +393,15 @@ function ChapterEditorPanel({
                 <p className="mt-1 text-xs text-slate-500">{chapter.source} · {chapter.confidence}</p>
               </div>
               <div className="flex flex-wrap gap-2">
-                <button
-                  className="rounded-full border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
-                  onClick={() => onPreviewPage(Math.max(chapter.start_page, 0))}
-                  type="button"
-                >
-                  Preview page
-                </button>
+                {documentKind === 'pdf' ? (
+                  <button
+                    className="rounded-full border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
+                    onClick={() => onPreviewPage(Math.max(chapter.start_page, 0))}
+                    type="button"
+                  >
+                    Preview page
+                  </button>
+                ) : null}
                 <button
                   className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
                   disabled={chapters.length === 1}
@@ -411,7 +422,7 @@ function ChapterEditorPanel({
                 />
               </label>
               <label className="block">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Start page</p>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">{documentKind === 'pdf' ? 'Start page' : 'Start block'}</p>
                 <input
                   className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400"
                   max={totalPages}
