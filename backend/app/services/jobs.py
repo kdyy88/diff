@@ -10,11 +10,12 @@ from uuid import uuid4
 
 from fastapi import UploadFile
 
-from app.core.config import TERMINAL_RECORD_TTL_SECONDS, ensure_default_temp_dir
+from app.core.config import TERMINAL_RECORD_TTL_SECONDS, ensure_default_temp_dir, ensure_markdown_output_dir
 from app.models.schemas import CreateJobResponse, DiffResult, JobStatus
 from app.services.chapters import ChapterExecutionPair, aggregate_chapter_results
 from app.services.differ import compare_documents
 from app.services.extractor import extract_document, extract_page_infos
+from app.services.markdown_bundle import build_markdown_bundle
 
 
 @dataclass
@@ -31,6 +32,7 @@ class _JobRecord:
     chapter_pairs: list[ChapterExecutionPair] | None = None
     error: str | None = None
     result: DiffResult | None = None
+    markdown_dir: Path | None = None
     created_at: float = 0.0
     last_accessed_at: float = 0.0
 
@@ -174,6 +176,7 @@ class JobStore:
                 return diff_result
 
             result = await asyncio.to_thread(run_pipeline)
+            job.markdown_dir = await asyncio.to_thread(self._persist_markdown_bundle, job.id, result)
             job.result = result
             job.progress = 100
             job.status = "done"
@@ -183,6 +186,16 @@ class JobStore:
             job.stage = "failed"
             job.progress = 100
             job.error = str(exc)
+
+    def _persist_markdown_bundle(self, job_id: str, result: DiffResult) -> Path:
+        output_dir = ensure_markdown_output_dir() / job_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        bundle = build_markdown_bundle(job_id, result)
+        for bundle_file in bundle.files:
+            (output_dir / bundle_file.name).write_text(bundle_file.content, encoding="utf-8")
+
+        return output_dir
 
     def _run_chapter_pipeline(self, job: _JobRecord) -> DiffResult:
         assert job.chapter_pairs is not None

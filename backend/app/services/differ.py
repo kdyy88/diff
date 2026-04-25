@@ -18,6 +18,8 @@ DIFF_INSERT = 1
 DIFF_EQUAL = 0
 WEAK_DELIMITER_CHARS = {" ", ",", "，", "、", ":", "：", "/", "-", "(", ")", "（", "）"}
 STRONG_BOUNDARY_CHARS = {"\n", ".", "。", ";", "；", "!", "！", "?", "？"}
+EXCERPT_TARGET_MIN_CHARS = 80
+EXCERPT_TARGET_MAX_CHARS = 160
 LIST_PREFIX_RE = re.compile(r"^\(?[0-9一二三四五六七八九十]+\)?[、.．)]?$")
 
 
@@ -165,6 +167,11 @@ def _is_strong_boundary(document: DocumentProjection, index: int) -> bool:
     if not (0 <= index < len(document.chars)):
         return True
     char = document.chars[index]
+    if char.char == ".":
+        left_char = document.chars[index - 1].char if index > 0 else ""
+        right_char = document.chars[index + 1].char if index + 1 < len(document.chars) else ""
+        if left_char.isdigit() and right_char.isdigit():
+            return False
     if char.char in STRONG_BOUNDARY_CHARS:
         return True
     if char.char.isspace():
@@ -336,6 +343,149 @@ def _slice_excerpt(text: str, limit: int = 120) -> str:
     return compact[:limit]
 
 
+def _trim_char_range(document: DocumentProjection, start: int, end: int) -> tuple[int, int]:
+    start = max(start, 0)
+    end = min(end, len(document.chars))
+    while start < end and document.chars[start].char.isspace():
+        start += 1
+    while end > start and document.chars[end - 1].char.isspace():
+        end -= 1
+    return start, end
+
+
+def _previous_strong_boundary(document: DocumentProjection, start: int) -> int | None:
+    for index in range(min(start - 1, len(document.chars) - 1), -1, -1):
+        if _is_strong_boundary(document, index):
+            return index
+    return None
+
+
+def _next_strong_boundary(document: DocumentProjection, end: int) -> int | None:
+    for index in range(max(end, 0), len(document.chars)):
+        if _is_strong_boundary(document, index):
+            return index
+    return None
+
+
+def _expand_excerpt_window(
+    document: DocumentProjection,
+    start: int,
+    end: int,
+    *,
+    target_length: int,
+    can_grow_left: bool,
+    can_grow_right: bool,
+) -> tuple[int, int]:
+    if end - start >= target_length:
+        return start, end
+
+    remaining = target_length - (end - start)
+    grow_left = remaining // 2 if can_grow_left else 0
+    grow_right = remaining - grow_left if can_grow_right else 0
+    if not can_grow_right:
+        grow_left = remaining
+    if not can_grow_left:
+        grow_right = remaining
+    next_start = max(0, start - grow_left)
+    next_end = min(len(document.chars), end + grow_right)
+
+    shortfall = target_length - (next_end - next_start)
+    if shortfall > 0 and can_grow_left and next_start > 0:
+        borrowed = min(next_start, shortfall)
+        next_start -= borrowed
+        shortfall -= borrowed
+    if shortfall > 0 and can_grow_right and next_end < len(document.chars):
+        next_end = min(len(document.chars), next_end + shortfall)
+
+    return _trim_char_range(document, next_start, next_end)
+
+
+def _clip_excerpt_window(
+    document: DocumentProjection,
+    start: int,
+    end: int,
+    *,
+    focus_start: int,
+    focus_end: int,
+    max_length: int,
+) -> tuple[int, int]:
+    focus_start, focus_end = _trim_char_range(document, focus_start, focus_end)
+    if focus_start >= focus_end:
+        focus_start, focus_end = start, min(start + max_length, end)
+
+    focus_length = focus_end - focus_start
+    if focus_length >= max_length:
+        clipped_start = focus_start
+        clipped_end = focus_start + max_length
+        return _trim_char_range(document, clipped_start, clipped_end)
+
+    remaining = max_length - focus_length
+    available_left = max(focus_start - start, 0)
+    available_right = max(end - focus_end, 0)
+
+    take_left = min(available_left, remaining // 2)
+    take_right = min(available_right, remaining - take_left)
+    missing = remaining - take_left - take_right
+    if missing > 0 and available_left > take_left:
+        extra_left = min(available_left - take_left, missing)
+        take_left += extra_left
+        missing -= extra_left
+    if missing > 0 and available_right > take_right:
+        take_right += min(available_right - take_right, missing)
+
+    clipped_start = focus_start - take_left
+    clipped_end = focus_end + take_right
+    return _trim_char_range(document, clipped_start, clipped_end)
+
+
+def _contextual_excerpt(
+    document: DocumentProjection,
+    start: int | None,
+    end: int | None,
+    *,
+    min_length: int = EXCERPT_TARGET_MIN_CHARS,
+    max_length: int = EXCERPT_TARGET_MAX_CHARS,
+) -> str:
+    if start is None or end is None or start >= end:
+        return ""
+
+    focus_start, focus_end = _trim_char_range(document, start, end)
+    if focus_start >= focus_end:
+        return ""
+
+    previous_boundary = _previous_strong_boundary(document, focus_start)
+    next_boundary = _next_strong_boundary(document, focus_end)
+    window_start = previous_boundary + 1 if previous_boundary is not None else 0
+    window_end = next_boundary + 1 if next_boundary is not None else len(document.chars)
+    window_start, window_end = _trim_char_range(document, window_start, window_end)
+
+    if window_start >= window_end or window_end - window_start > max_length:
+        window_start, window_end = focus_start, focus_end
+
+    can_grow_left = previous_boundary is None
+    can_grow_right = next_boundary is None
+    if can_grow_left or can_grow_right:
+        window_start, window_end = _expand_excerpt_window(
+            document,
+            window_start,
+            window_end,
+            target_length=min_length,
+            can_grow_left=can_grow_left,
+            can_grow_right=can_grow_right,
+        )
+    if window_end - window_start > max_length:
+        window_start, window_end = _clip_excerpt_window(
+            document,
+            window_start,
+            window_end,
+            focus_start=focus_start,
+            focus_end=focus_end,
+            max_length=max_length,
+        )
+
+    return _slice_excerpt(_text_for_range(document, (window_start, window_end)), limit=max_length)
+
+
 def _compact_table_value(text: str, limit: int = 80) -> str:
     compact = " ".join(text.split())
     if not compact:
@@ -493,12 +643,8 @@ def _anchor_from_candidate(
     left_projection = project_range(document_a, candidate.start_a, candidate.end_a)
     right_projection = project_range(document_b, candidate.start_b, candidate.end_b)
 
-    excerpt_left = _slice_excerpt(
-        left_projection.excerpt or _text_for_range(document_a, (candidate.start_a, candidate.end_a))
-    )
-    excerpt_right = _slice_excerpt(
-        right_projection.excerpt or _text_for_range(document_b, (candidate.start_b, candidate.end_b))
-    )
+    excerpt_left = _contextual_excerpt(document_a, candidate.start_a, candidate.end_a)
+    excerpt_right = _contextual_excerpt(document_b, candidate.start_b, candidate.end_b)
 
     return DiffAnchor(
         id=f"anchor-text-{index}",
@@ -705,8 +851,8 @@ def _build_reflow_anchor(
         kind="reflow",
         source_type="text",
         confidence="high",
-        excerpt_left=_slice_excerpt(left_projection.excerpt or _text_for_range(document_a, (start_a, end_a))),
-        excerpt_right=_slice_excerpt(right_projection.excerpt or _text_for_range(document_b, (start_b, end_b))),
+        excerpt_left=_contextual_excerpt(document_a, start_a, end_a),
+        excerpt_right=_contextual_excerpt(document_b, start_b, end_b),
         left_fragments=left_projection.fragments,
         right_fragments=right_projection.fragments,
         left_range=left_projection.char_range,

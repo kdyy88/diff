@@ -90,6 +90,8 @@ uv run uvicorn app.main:app --reload --port 8000
 
 The API will be available at `http://localhost:8000`.
 
+Completed jobs also save LLM-ready markdown shards under `artifacts/markdown-jobs/<job_id>/` at the repository root.
+
 Useful endpoints while developing:
 
 - `GET /health`
@@ -114,6 +116,8 @@ The backend exposes an async job workflow:
 2. `GET /api/jobs/{id}` polls job progress.
 3. `GET /api/jobs/{id}/result` fetches the final diff anchors.
 4. `GET /api/jobs/{id}/files/{side}` streams the original uploaded PDF back for rendering.
+
+After a job reaches `done`, the backend also writes markdown bundle files such as `00-overview.md` and `10-part-01.md` into `artifacts/markdown-jobs/{id}/`.
 
 When chapter mode is enabled, the backend also exposes a feature-discovery and chapter-analysis workflow:
 

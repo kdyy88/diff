@@ -343,6 +343,35 @@ def test_compare_documents_emits_replace_anchor() -> None:
     assert any(anchor.kind == "replace" for anchor in result.anchors)
 
 
+def test_compare_documents_uses_contextual_excerpts_for_text_replace() -> None:
+    left = _build_document("The subject received 0.5 mg daily; adverse events remained stable")
+    right = _build_document("The subject received 0.05 mg daily; adverse events remained stable")
+
+    result = compare_documents(left, right, include_reflow=False)
+    anchor = next(anchor for anchor in result.anchors if anchor.kind == "replace")
+
+    assert "The subject received" in anchor.excerpt_left
+    assert "mg daily" in anchor.excerpt_left
+    assert "The subject received" in anchor.excerpt_right
+    assert len(anchor.excerpt_left) <= 160
+    assert len(anchor.excerpt_right) <= 160
+
+
+def test_compare_documents_avoids_isolated_word_excerpts_for_replace() -> None:
+    left = _build_document("该药物对肿瘤细胞增殖具有明显抑制作用，且安全性良好。")
+    right = _build_document("该药物对肿瘤细胞增殖具有明显促进作用，且安全性良好。")
+
+    result = compare_documents(left, right, include_reflow=False)
+    anchor = next(anchor for anchor in result.anchors if anchor.kind == "replace")
+
+    assert anchor.excerpt_left != "抑制"
+    assert anchor.excerpt_right != "促进"
+    assert "肿瘤细胞增殖" in anchor.excerpt_left
+    assert "肿瘤细胞增殖" in anchor.excerpt_right
+    assert "作用" in anchor.excerpt_left
+    assert "作用" in anchor.excerpt_right
+
+
 def test_compare_documents_emits_reflow_anchor_for_large_equal_block() -> None:
     text = "This section remains stable across pages but moves later into the next page without content changes"
     left = _build_document(text, page=0, y=120.0)

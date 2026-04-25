@@ -25,9 +25,16 @@ PDF_FLOW_DIFF_ENABLE_CHAPTER_SPLIT = _read_bool_env(
 	default=True,
 )
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_TEMP_DIR = Path(tempfile.gettempdir()) / "pdf-flow-diff"
+DEFAULT_MARKDOWN_OUTPUT_DIR = REPOSITORY_ROOT / "artifacts" / "markdown-jobs"
 
 
 def ensure_default_temp_dir() -> Path:
 	DEFAULT_TEMP_DIR.mkdir(parents=True, exist_ok=True)
 	return DEFAULT_TEMP_DIR
+
+
+def ensure_markdown_output_dir() -> Path:
+	DEFAULT_MARKDOWN_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+	return DEFAULT_MARKDOWN_OUTPUT_DIR
