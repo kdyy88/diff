@@ -11,6 +11,7 @@ It is designed for workflows where a tiny text change matters, but a single inse
 - Projects every review anchor back to page coordinates for visual highlighting.
 - Supports a review-friendly dual-pane UI with anchor jumping instead of fragile scroll lock.
 - Separates explicit-grid table regions from body text so table edits can be reviewed at cell level.
+- Optionally splits the review flow into chapter analysis, confirmation, per-chapter diff, and chapter-filtered review.
 
 ## Current scope
 
@@ -40,6 +41,16 @@ The core pipeline is:
 5. Coalesce raw edit events into review-friendly anchors and mark risky large windows as low confidence.
 6. Project anchor ranges back to PDF page coordinates.
 7. Render side-by-side PDFs with anchor-linked highlights in the React UI.
+
+When `PDF_FLOW_DIFF_ENABLE_CHAPTER_SPLIT=true`, the upload flow can branch into:
+
+1. `upload`
+2. `chapter analysis`
+3. `chapter confirmation`
+4. `chapter diff job`
+5. `review`
+
+The chapter mode never exports physical sub-PDFs. It reuses the main diff stack with page-range extraction and then aggregates the per-chapter results back into one review result.
 
 See [docs/architecture.md](docs/architecture.md) for the full module breakdown.
 
@@ -73,6 +84,7 @@ Requirements:
 ```bash
 cd backend
 uv sync --extra dev
+export PDF_FLOW_DIFF_ENABLE_CHAPTER_SPLIT=true
 uv run uvicorn app.main:app --reload --port 8000
 ```
 
@@ -102,6 +114,17 @@ The backend exposes an async job workflow:
 2. `GET /api/jobs/{id}` polls job progress.
 3. `GET /api/jobs/{id}/result` fetches the final diff anchors.
 4. `GET /api/jobs/{id}/files/{side}` streams the original uploaded PDF back for rendering.
+
+When chapter mode is enabled, the backend also exposes a feature-discovery and chapter-analysis workflow:
+
+1. `GET /api/features` returns `chapterSplit`.
+2. `POST /api/chapter-analyses` uploads the PDFs and starts bookmark-based chapter analysis.
+3. `GET /api/chapter-analyses/{id}` polls chapter-analysis progress.
+4. `GET /api/chapter-analyses/{id}/result` returns the editable chapter plans.
+5. `POST /api/chapter-analyses/{id}/validate` performs authoritative page-cover and exact-title matching checks.
+6. `POST /api/chapter-analyses/{id}/confirm` returns the existing `CreateJobResponse`, after which the frontend goes back to the normal `processing -> review` flow.
+
+If chapter analysis finds that either PDF does not contain usable built-in bookmarks, the app automatically falls back to the normal full-document diff flow.
 
 Primary anchor kinds:
 
@@ -136,6 +159,13 @@ Frontend build:
 ```bash
 cd frontend
 pnpm build
+```
+
+Feature-flagged chapter flow validation:
+
+```bash
+cd backend
+uv run pytest app/tests/test_chapters.py
 ```
 
 ## How table diffs currently work
@@ -174,6 +204,7 @@ This repository is released under `GPL-2.0-only` to stay compatible with the cur
 ## Roadmap
 
 - Better table matching for inserted/deleted sections across multiple pages
+- Smarter bookmark-poor document onboarding beyond the current manual fallback
 - Optional audit-mode output that preserves raw low-level edit events
 - Exportable machine-readable results
 - Broader browser compatibility validation

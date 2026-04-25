@@ -1,5 +1,14 @@
 export type DiffKind = 'insert' | 'delete' | 'replace' | 'reflow';
 export type ConfidenceLevel = 'high' | 'low';
+export type ChapterConfidenceLevel = 'high' | 'medium' | 'low';
+export type ChapterSource = 'bookmark' | 'manual' | 'synthetic';
+export type JobState = 'uploaded' | 'extracting' | 'aligning' | 'projecting' | 'done' | 'failed';
+export type ChapterAnalysisState = 'uploaded' | 'analyzing' | 'fallback' | 'done' | 'failed';
+export type AnalysisSide = 'source' | 'modified';
+
+export interface FeatureFlags {
+  chapterSplit: boolean;
+}
 
 export interface HighlightFragment {
   page: number;
@@ -34,6 +43,9 @@ export interface DiffAnchor {
   raw_event_count: number;
   group_key: string | null;
   table_context: TableContext | null;
+  chapter_id: string | null;
+  chapter_title: string | null;
+  chapter_index: number | null;
 }
 
 export interface DiffSummary {
@@ -51,20 +63,22 @@ export interface PageMeta {
   height: number;
 }
 
+export interface ChapterDiffSummary {
+  id: string;
+  title: string;
+  index: number;
+  anchor_count: number;
+  first_anchor_id: string | null;
+  summary: DiffSummary;
+}
+
 export interface DiffResult {
   pages_left: PageMeta[];
   pages_right: PageMeta[];
   summary: DiffSummary;
   anchors: DiffAnchor[];
+  chapters: ChapterDiffSummary[];
 }
-
-export type JobState =
-  | 'uploaded'
-  | 'extracting'
-  | 'aligning'
-  | 'projecting'
-  | 'done'
-  | 'failed';
 
 export interface JobStatus {
   id: string;
@@ -78,4 +92,71 @@ export interface JobStatus {
 export interface CreateJobResponse {
   id: string;
   status: JobState;
+}
+
+export interface ChapterDraft {
+  id: string;
+  title: string;
+  normalized_title: string;
+  start_page: number;
+  end_page: number;
+  source: ChapterSource;
+  confidence: ChapterConfidenceLevel;
+}
+
+export interface DocumentChapterPlan {
+  side: AnalysisSide;
+  total_pages: number;
+  chapters: ChapterDraft[];
+}
+
+export interface ChapterAnalysisStatus {
+  id: string;
+  status: ChapterAnalysisState;
+  stage: string;
+  progress: number;
+  error: string | null;
+}
+
+export interface ChapterAnalysisResult {
+  id: string;
+  status: ChapterAnalysisState;
+  source_plan: DocumentChapterPlan;
+  modified_plan: DocumentChapterPlan;
+}
+
+export interface ChapterValidationIssue {
+  code:
+    | 'invalid_page'
+    | 'non_increasing_start'
+    | 'coverage_gap'
+    | 'duplicate_normalized_title'
+    | 'unmatched_chapter';
+  side: AnalysisSide;
+  chapter_id: string;
+  message: string;
+  raw_title: string;
+  normalized_title: string;
+  peer_chapter_id: string | null;
+  peer_raw_title: string | null;
+  peer_normalized_title: string | null;
+  suggested_peer_score: number | null;
+}
+
+export interface ChapterValidationItem {
+  id: string;
+  title: string;
+  start_page: number;
+}
+
+export interface ChapterValidationRequest {
+  source_chapters: ChapterValidationItem[];
+  modified_chapters: ChapterValidationItem[];
+}
+
+export interface ChapterValidationResult {
+  can_continue: boolean;
+  issues: ChapterValidationIssue[];
+  source_plan: DocumentChapterPlan;
+  modified_plan: DocumentChapterPlan;
 }

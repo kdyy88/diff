@@ -418,32 +418,40 @@ def extract_document(
     *,
     header_margin: float,
     footer_margin: float,
+    page_range: tuple[int, int] | None = None,
 ) -> DocumentProjection:
     path = Path(pdf_path)
-    doc = fitz.open(path)
     pages: list[PageInfo] = []
     extracted_lines: list[_RawLine] = []
     tables: list[TableRegion] = []
 
-    for page_number, page in enumerate(doc):
-        rect = page.rect
-        pages.append(PageInfo(page=page_number, width=rect.width, height=rect.height))
-        page_tables = _extract_tables_from_page(
-            page,
-            page_number=page_number,
-            header_margin=header_margin,
-            footer_margin=footer_margin,
-        )
-        tables.extend(page_tables)
-        extracted_lines.extend(
-            _extract_lines_from_page(
+    with fitz.open(path) as doc:
+        if page_range is None:
+            page_numbers = range(len(doc))
+        else:
+            start_page, end_page = page_range
+            page_numbers = range(max(start_page, 0), min(end_page, len(doc) - 1) + 1)
+
+        for page_number in page_numbers:
+            page = doc.load_page(page_number)
+            rect = page.rect
+            pages.append(PageInfo(page=page_number, width=rect.width, height=rect.height))
+            page_tables = _extract_tables_from_page(
                 page,
                 page_number=page_number,
                 header_margin=header_margin,
                 footer_margin=footer_margin,
-                tables=page_tables,
             )
-        )
+            tables.extend(page_tables)
+            extracted_lines.extend(
+                _extract_lines_from_page(
+                    page,
+                    page_number=page_number,
+                    header_margin=header_margin,
+                    footer_margin=footer_margin,
+                    tables=page_tables,
+                )
+            )
 
     chars: list[CharAtom] = []
     words: list[WordAtom] = []
@@ -526,3 +534,12 @@ def extract_document(
         aligned_text=aligned_text,
         aligned_to_raw=aligned_to_raw,
     )
+
+
+def extract_page_infos(pdf_path: str | Path) -> list[PageInfo]:
+    path = Path(pdf_path)
+    with fitz.open(path) as doc:
+        return [
+            PageInfo(page=index, width=float(page.rect.width), height=float(page.rect.height))
+            for index, page in enumerate(doc)
+        ]

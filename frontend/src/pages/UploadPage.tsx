@@ -6,12 +6,23 @@ interface UploadPageProps {
     modifiedPdf: File;
     headerMargin: number;
     footerMargin: number;
+    enableChapterSplit: boolean;
   }) => Promise<void>;
   submitting: boolean;
   error: string | null;
+  chapterFeatureEnabled: boolean;
+  enableChapterSplit: boolean;
+  onEnableChapterSplitChange: (value: boolean) => void;
 }
 
-export function UploadPage({ onSubmit, submitting, error }: UploadPageProps) {
+export function UploadPage({
+  onSubmit,
+  submitting,
+  error,
+  chapterFeatureEnabled,
+  enableChapterSplit,
+  onEnableChapterSplitChange,
+}: UploadPageProps) {
   const [sourcePdf, setSourcePdf] = useState<File | null>(null);
   const [modifiedPdf, setModifiedPdf] = useState<File | null>(null);
   const [headerMargin, setHeaderMargin] = useState(50);
@@ -22,19 +33,21 @@ export function UploadPage({ onSubmit, submitting, error }: UploadPageProps) {
     if (!sourcePdf || !modifiedPdf) {
       return;
     }
-    await onSubmit({ sourcePdf, modifiedPdf, headerMargin, footerMargin });
+    await onSubmit({
+      sourcePdf,
+      modifiedPdf,
+      headerMargin,
+      footerMargin,
+      enableChapterSplit,
+    });
   };
 
   return (
     <main className="mx-auto flex min-h-screen max-w-6xl items-center px-6 py-12">
       <div className="grid w-full gap-8 lg:grid-cols-[1.1fr_0.9fr]">
         <section className="rounded-[40px] border border-white/60 bg-white/80 p-8 shadow-2xl shadow-slate-200/60 backdrop-blur">
-          <p className="text-xs font-semibold uppercase tracking-[0.28em] text-emerald-700">
-            Text Flow Reconstruction
-          </p>
-          <h1 className="mt-4 text-4xl font-semibold tracking-tight text-slate-950">
-            Audit-grade PDF diff for pagination reflow
-          </h1>
+          <p className="text-xs font-semibold uppercase tracking-[0.28em] text-emerald-700">Text Flow Reconstruction</p>
+          <h1 className="mt-4 text-4xl font-semibold tracking-tight text-slate-950">Audit-grade PDF diff for pagination reflow</h1>
           <p className="mt-4 max-w-2xl text-base leading-7 text-slate-600">
             Upload the source and modified PDFs, reconstruct each document as a continuous text stream,
             compute a character-level diff, then project the changes back onto the original pages for review.
@@ -42,7 +55,7 @@ export function UploadPage({ onSubmit, submitting, error }: UploadPageProps) {
           <div className="mt-8 grid gap-4 sm:grid-cols-3">
             <Metric title="Non-linear aware" value="Across pages" />
             <Metric title="Diff precision" value="Character-level" />
-            <Metric title="Reviewer focus" value="Anchor-driven" />
+            <Metric title="Reviewer focus" value={chapterFeatureEnabled ? 'Whole book or by chapter' : 'Anchor-driven'} />
           </div>
         </section>
 
@@ -52,28 +65,28 @@ export function UploadPage({ onSubmit, submitting, error }: UploadPageProps) {
             <h2 className="mt-2 text-2xl font-semibold text-slate-950">Start a new comparison</h2>
           </div>
           <form className="mt-8 space-y-5" onSubmit={handleSubmit}>
-            <FileField
-              label="Source PDF"
-              onChange={(file) => setSourcePdf(file)}
-              selectedFile={sourcePdf}
-            />
-            <FileField
-              label="Modified PDF"
-              onChange={(file) => setModifiedPdf(file)}
-              selectedFile={modifiedPdf}
-            />
+            <FileField label="Source PDF" onChange={(file) => setSourcePdf(file)} selectedFile={sourcePdf} />
+            <FileField label="Modified PDF" onChange={(file) => setModifiedPdf(file)} selectedFile={modifiedPdf} />
             <div className="grid gap-4 sm:grid-cols-2">
-              <NumberField
-                label="Header margin (pt)"
-                value={headerMargin}
-                onChange={setHeaderMargin}
-              />
-              <NumberField
-                label="Footer margin (pt)"
-                value={footerMargin}
-                onChange={setFooterMargin}
-              />
+              <NumberField label="Header margin (pt)" value={headerMargin} onChange={setHeaderMargin} />
+              <NumberField label="Footer margin (pt)" value={footerMargin} onChange={setFooterMargin} />
             </div>
+            {chapterFeatureEnabled ? (
+              <label className="flex items-start gap-3 rounded-[24px] border border-slate-200 bg-slate-50/80 px-4 py-4">
+                <input
+                  checked={enableChapterSplit}
+                  className="mt-1 h-4 w-4 rounded border-slate-300 text-slate-950 focus:ring-slate-400"
+                  onChange={(event) => onEnableChapterSplitChange(event.target.checked)}
+                  type="checkbox"
+                />
+                <div>
+                  <p className="text-sm font-semibold text-slate-900">Compare chapter by chapter</p>
+                  <p className="mt-1 text-sm leading-6 text-slate-600">
+                    Run bookmark-based chapter analysis first, review the detected outline, then diff each matched chapter.
+                  </p>
+                </div>
+              </label>
+            ) : null}
             {error ? (
               <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
                 {error}
@@ -84,7 +97,7 @@ export function UploadPage({ onSubmit, submitting, error }: UploadPageProps) {
               disabled={!sourcePdf || !modifiedPdf || submitting}
               type="submit"
             >
-              {submitting ? 'Submitting…' : 'Run diff job'}
+              {submitting ? 'Submitting…' : chapterFeatureEnabled && enableChapterSplit ? 'Analyze chapters' : 'Run diff job'}
             </button>
           </form>
         </section>

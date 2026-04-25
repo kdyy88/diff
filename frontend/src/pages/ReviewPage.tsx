@@ -10,8 +10,10 @@ interface ReviewPageProps {
   jobId: string;
   result: DiffResult;
   activeAnchorId: string | null;
+  activeChapterId: string | null;
   showReflow: boolean;
   onSelectAnchor: (anchorId: string) => void;
+  onSelectChapter: (chapterId: string | null) => void;
   onToggleReflow: () => void;
   onNext: () => void;
   onPrevious: () => void;
@@ -21,16 +23,25 @@ export function ReviewPage({
   jobId,
   result,
   activeAnchorId,
+  activeChapterId,
   showReflow,
   onSelectAnchor,
+  onSelectChapter,
   onToggleReflow,
   onNext,
   onPrevious,
 }: ReviewPageProps) {
   const visibleAnchors = useMemo(
-    () => result.anchors.filter((anchor) => showReflow || anchor.kind !== 'reflow'),
-    [result.anchors, showReflow],
+    () =>
+      result.anchors.filter((anchor) => {
+        const matchesReflow = showReflow || anchor.kind !== 'reflow';
+        const matchesChapter = activeChapterId ? anchor.chapter_id === activeChapterId : true;
+        return matchesReflow && matchesChapter;
+      }),
+    [activeChapterId, result.anchors, showReflow],
   );
+  const selectedChapter = result.chapters.find((chapter) => chapter.id === activeChapterId) ?? null;
+  const summary = selectedChapter?.summary ?? result.summary;
   const currentIndex = Math.max(
     0,
     visibleAnchors.findIndex((anchor) => anchor.id === activeAnchorId),
@@ -47,13 +58,45 @@ export function ReviewPage({
         </div>
         <div className="rounded-[28px] border border-slate-200/70 bg-white/85 px-5 py-4 shadow-lg shadow-slate-200/40 backdrop-blur">
           <div className="grid grid-cols-2 gap-5 text-sm text-slate-600 md:grid-cols-4">
-            <SummaryCell label="Insertions" value={String(result.summary.insertions)} />
-            <SummaryCell label="Deletions" value={String(result.summary.deletions)} />
-            <SummaryCell label="Replacements" value={String(result.summary.replacements)} />
-            <SummaryCell label="Reflows" value={String(result.summary.reflows)} />
+            <SummaryCell label="Insertions" value={String(summary.insertions)} />
+            <SummaryCell label="Deletions" value={String(summary.deletions)} />
+            <SummaryCell label="Replacements" value={String(summary.replacements)} />
+            <SummaryCell label="Reflows" value={String(summary.reflows)} />
           </div>
         </div>
       </div>
+
+      {result.chapters.length > 0 ? (
+        <div className="mb-5 rounded-[28px] border border-slate-200/70 bg-white/85 p-4 shadow-lg shadow-slate-200/40 backdrop-blur">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              className={`rounded-full px-3 py-2 text-sm font-semibold transition ${
+                activeChapterId === null
+                  ? 'bg-slate-950 text-white shadow-md shadow-slate-300'
+                  : 'border border-slate-300 bg-white text-slate-700 hover:border-slate-400 hover:bg-slate-50'
+              }`}
+              onClick={() => onSelectChapter(null)}
+              type="button"
+            >
+              All Chapters
+            </button>
+            {result.chapters.map((chapter) => (
+              <button
+                key={chapter.id}
+                className={`rounded-full px-3 py-2 text-sm font-semibold transition ${
+                  activeChapterId === chapter.id
+                    ? 'bg-slate-950 text-white shadow-md shadow-slate-300'
+                    : 'border border-slate-300 bg-white text-slate-700 hover:border-slate-400 hover:bg-slate-50'
+                }`}
+                onClick={() => onSelectChapter(chapter.id)}
+                type="button"
+              >
+                {chapter.title} · {chapter.anchor_count}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_420px_minmax(0,1fr)]">
         <PdfPane

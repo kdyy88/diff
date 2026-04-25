@@ -22,6 +22,29 @@ The backend uses a job-based workflow:
 3. Fetch review anchors with `GET /api/jobs/{job_id}/result`.
 4. Render the uploaded PDF files with `GET /api/jobs/{job_id}/files/{side}`.
 
+When `PDF_FLOW_DIFF_ENABLE_CHAPTER_SPLIT=true`, the backend also exposes a chapter-analysis workflow:
+
+1. Discover capabilities with `GET /api/features`.
+2. Upload PDFs to `POST /api/chapter-analyses`.
+3. Poll `GET /api/chapter-analyses/{analysis_id}`.
+4. Fetch editable draft chapters from `GET /api/chapter-analyses/{analysis_id}/result`.
+5. Run authoritative validation with `POST /api/chapter-analyses/{analysis_id}/validate`.
+6. Confirm the plan with `POST /api/chapter-analyses/{analysis_id}/confirm`, which returns the same `CreateJobResponse` as `POST /api/jobs`.
+
+Chapter-analysis endpoints return `404` when the feature flag is disabled.
+
+## `GET /api/features`
+
+Feature discovery for frontend capability gating.
+
+Response:
+
+```json
+{
+  "chapterSplit": true
+}
+```
+
 ## `GET /health`
 
 Simple health check.
@@ -172,11 +195,21 @@ Response shape:
       "right_range": { "start": 120, "end": 132 },
       "raw_event_count": 1,
       "group_key": "text-group-0",
-      "table_context": null
+      "table_context": null,
+      "chapter_id": null,
+      "chapter_title": null,
+      "chapter_index": null
     }
-  ]
+  ],
+  "chapters": []
 }
 ```
+
+When the result came from chapter mode:
+
+- `anchors[*].chapter_id`, `chapter_title`, and `chapter_index` are populated.
+- `chapters[]` includes per-chapter summary counts even when a chapter produced zero anchors.
+- `pages_left` and `pages_right` still describe the full original PDFs so the existing previewer can render original pages.
 
 Special cases:
 
@@ -230,6 +263,177 @@ Possible errors:
 - `raw_event_count`: how many raw low-level edit events were merged into this review anchor
 - `group_key`: normalization/debug group identifier
 - `table_context`: populated only for `source_type="table"`
+- `chapter_id`: populated only for chapter-mode results
+- `chapter_title`: populated only for chapter-mode results
+- `chapter_index`: populated only for chapter-mode results
+
+### `ChapterDiffSummary`
+
+- `id`: chapter identifier used for filtering
+- `title`: chapter title after confirmation
+- `index`: zero-based chapter order in the confirmed source-side plan
+- `anchor_count`: number of anchors in that chapter
+- `first_anchor_id`: first anchor in that chapter, or `null` when the chapter has no anchors
+- `summary`: `DiffSummary` scoped to that chapter
+
+## `POST /api/chapter-analyses`
+
+Create a new chapter-analysis job.
+
+Content type:
+
+```text
+multipart/form-data
+```
+
+Form fields are the same as `POST /api/jobs`.
+
+Response:
+
+```json
+{
+  "id": "analysis-2b6852f8c1a64f4cb3cf2a52db0df444",
+  "status": "uploaded",
+  "stage": "uploaded",
+  "progress": 0,
+  "error": null
+}
+```
+
+## `GET /api/chapter-analyses/{analysis_id}`
+
+Poll chapter-analysis progress.
+
+`status` values:
+
+- `uploaded`
+- `analyzing`
+- `done`
+- `failed`
+
+## `GET /api/chapter-analyses/{analysis_id}/result`
+
+Fetch the editable chapter draft plans once chapter analysis finishes.
+
+Response shape:
+
+```json
+{
+  "id": "analysis-2b6852f8c1a64f4cb3cf2a52db0df444",
+  "status": "done",
+  "source_plan": {
+    "side": "source",
+    "total_pages": 24,
+    "chapters": [
+      {
+        "id": "source-chapter-0",
+        "title": "Front Matter",
+        "normalized_title": "front matter",
+        "start_page": 0,
+        "end_page": 1,
+        "source": "synthetic",
+        "confidence": "medium"
+      }
+    ]
+  },
+  "modified_plan": {
+    "side": "modified",
+    "total_pages": 24,
+    "chapters": []
+  }
+}
+```
+
+Detection order is fixed:
+
+- bookmarks / table of contents only
+
+All chapter page numbers are `0-based inclusive` in the backend contract.
+
+If no usable level-1 bookmarks are found for either side, chapter analysis returns `fallback` status and the frontend automatically starts the normal full-document diff flow instead of showing the chapter-confirmation UI.
+
+## `GET /api/chapter-analyses/{analysis_id}/files/{side}`
+
+Streams the original uploaded PDF for chapter confirmation previews.
+
+Supported `side` values:
+
+- `source`
+- `modified`
+
+## `POST /api/chapter-analyses/{analysis_id}/validate`
+
+Validate the edited chapter plans without starting the diff job.
+
+Request body:
+
+```json
+{
+  "source_chapters": [
+    {
+      "id": "source-chapter-0",
+      "title": "Front Matter",
+      "start_page": 0
+    }
+  ],
+  "modified_chapters": [
+    {
+      "id": "modified-chapter-0",
+      "title": "Front Matter",
+      "start_page": 0
+    }
+  ]
+}
+```
+
+Response shape:
+
+```json
+{
+  "can_continue": false,
+  "issues": [
+    {
+      "code": "unmatched_chapter",
+      "side": "source",
+      "chapter_id": "source-chapter-1",
+      "message": "No exact chapter title match was found on the modified side.",
+      "raw_title": "Appendix A",
+      "normalized_title": "appendix a",
+      "peer_chapter_id": "modified-chapter-1",
+      "peer_raw_title": "Appendix Alpha",
+      "peer_normalized_title": "appendix alpha",
+      "suggested_peer_score": 0.842
+    }
+  ],
+  "source_plan": { "side": "source", "total_pages": 12, "chapters": [] },
+  "modified_plan": { "side": "modified", "total_pages": 12, "chapters": [] }
+}
+```
+
+Validation rules are fixed in V1:
+
+- start pages must be integers
+- start pages must be strictly increasing
+- chapters must continuously cover the full document
+- normalized chapter titles must be unique on each side
+- chapter pairing requires exact equality on normalized titles
+
+The backend also computes the closest peer title with `SequenceMatcher`, but only as an explanation hint. It never auto-pairs unmatched chapters.
+
+## `POST /api/chapter-analyses/{analysis_id}/confirm`
+
+Confirm the validated chapter plan and create a normal diff job.
+
+Success response:
+
+```json
+{
+  "id": "job-7a6b8f9e10c24fd08b7fd5c9d7aa1f5f",
+  "status": "uploaded"
+}
+```
+
+If validation fails, the endpoint returns `409` and reuses the same structured payload shape as `POST /validate`.
 
 ### `HighlightFragment`
 

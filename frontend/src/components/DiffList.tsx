@@ -79,6 +79,11 @@ export function DiffList({ anchors, activeAnchorId, onSelect }: DiffListProps) {
                 </div>
               </div>
               <div className="mt-3 space-y-2 text-sm">
+                {anchor.chapter_title ? (
+                  <p className={isActive ? 'text-xs text-slate-300' : 'text-xs text-slate-500'}>
+                    Chapter · {anchor.chapter_title}
+                  </p>
+                ) : null}
                 {tableLabel ? (
                   <p className={isActive ? 'text-xs text-slate-300' : 'text-xs text-slate-500'}>
                     {tableLabel}
