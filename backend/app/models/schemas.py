@@ -64,6 +64,9 @@ class DiffAnchor(BaseModel):
     chapter_id: str | None = None
     chapter_title: str | None = None
     chapter_index: int | None = None
+    chapter_level: int | None = None
+    chapter_path: list[str] = Field(default_factory=list)
+    is_large_region: bool = False
 
 
 class DiffSummary(BaseModel):
@@ -79,8 +82,14 @@ class ChapterDraft(BaseModel):
     id: str
     title: str
     normalized_title: str
+    normalized_path: list[str] = Field(default_factory=list)
     start_page: int = Field(ge=0, description="0-based inclusive")
     end_page: int = Field(ge=0, description="0-based inclusive")
+    start_y: float | None = None
+    end_y: float | None = None
+    level: int = 1
+    parent_id: str | None = None
+    path: list[str] = Field(default_factory=list)
     source: ChapterSource
     confidence: ChapterConfidenceLevel
 
@@ -114,6 +123,10 @@ class ChapterValidationRequestItem(BaseModel):
     id: str
     title: str
     start_page: int
+    start_y: float | None = None
+    level: int | None = None
+    parent_id: str | None = None
+    path: list[str] = Field(default_factory=list)
 
 
 class ChapterValidationRequest(BaseModel):
@@ -138,6 +151,9 @@ class ChapterDiffSummary(BaseModel):
     id: str
     title: str
     index: int
+    level: int = 1
+    parent_id: str | None = None
+    path: list[str] = Field(default_factory=list)
     anchor_count: int = 0
     first_anchor_id: str | None = None
     summary: DiffSummary

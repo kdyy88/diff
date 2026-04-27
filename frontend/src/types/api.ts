@@ -58,6 +58,9 @@ export interface DiffAnchor {
   chapter_id: string | null;
   chapter_title: string | null;
   chapter_index: number | null;
+  chapter_level: number | null;
+  chapter_path: string[];
+  is_large_region: boolean;
 }
 
 export interface DiffSummary {
@@ -79,6 +82,9 @@ export interface ChapterDiffSummary {
   id: string;
   title: string;
   index: number;
+  level: number;
+  parent_id: string | null;
+  path: string[];
   anchor_count: number;
   first_anchor_id: string | null;
   summary: DiffSummary;
@@ -113,8 +119,14 @@ export interface ChapterDraft {
   id: string;
   title: string;
   normalized_title: string;
+  normalized_path: string[];
   start_page: number;
   end_page: number;
+  start_y: number | null;
+  end_y: number | null;
+  level: number;
+  parent_id: string | null;
+  path: string[];
   source: ChapterSource;
   confidence: ChapterConfidenceLevel;
 }
@@ -164,6 +176,10 @@ export interface ChapterValidationItem {
   id: string;
   title: string;
   start_page: number;
+  start_y?: number | null;
+  level?: number | null;
+  parent_id?: string | null;
+  path?: string[];
 }
 
 export interface ChapterValidationRequest {

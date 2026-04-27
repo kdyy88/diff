@@ -28,6 +28,10 @@ interface EditableChapter {
   id: string;
   title: string;
   start_page: number;
+  start_y: number | null;
+  level: number;
+  parent_id: string | null;
+  path: string[];
   source: ChapterDraft['source'];
   confidence: ChapterDraft['confidence'];
 }
@@ -48,6 +52,10 @@ function toEditable(chapters: ChapterDraft[]): EditableChapter[] {
     id: chapter.id,
     title: chapter.title,
     start_page: chapter.start_page,
+    start_y: chapter.start_y,
+    level: chapter.level,
+    parent_id: chapter.parent_id,
+    path: chapter.path,
     source: chapter.source,
     confidence: chapter.confidence,
   }));
@@ -61,13 +69,17 @@ function sortEditable(items: EditableChapter[]): EditableChapter[] {
     if (!Number.isFinite(right.start_page)) {
       return -1;
     }
-    return left.start_page - right.start_page;
+    if (left.start_page !== right.start_page) {
+      return left.start_page - right.start_page;
+    }
+    return (left.start_y ?? 0) - (right.start_y ?? 0);
   });
 }
 
 function collectLocalIssues(side: AnalysisSide, totalPages: number, chapters: EditableChapter[]): LocalIssue[] {
   const issues: LocalIssue[] = [];
   let previousStart: number | null = null;
+  let previousY: number | null = null;
   chapters.forEach((chapter, index) => {
     if (!Number.isInteger(chapter.start_page)) {
       issues.push({ side, chapter_id: chapter.id, message: 'Start page must be an integer.' });
@@ -76,21 +88,44 @@ function collectLocalIssues(side: AnalysisSide, totalPages: number, chapters: Ed
     if (chapter.start_page < 0 || chapter.start_page >= totalPages) {
       issues.push({ side, chapter_id: chapter.id, message: `Start page must be within 1 and ${totalPages}.` });
     }
-    if (previousStart !== null && chapter.start_page <= previousStart) {
+    const samePageForwardY =
+      previousStart !== null &&
+      chapter.start_page === previousStart &&
+      previousY !== null &&
+      chapter.start_y !== null &&
+      chapter.start_y > previousY;
+    if (previousStart !== null && chapter.start_page <= previousStart && !samePageForwardY) {
       issues.push({ side, chapter_id: chapter.id, message: 'Start pages must be strictly increasing.' });
     }
     if (index === 0 && chapter.start_page !== 0) {
       issues.push({ side, chapter_id: chapter.id, message: 'The first chapter must start on page 1.' });
     }
     previousStart = chapter.start_page;
+    previousY = chapter.start_y;
   });
   return issues;
 }
 
 function buildPayload(sourceChapters: EditableChapter[], modifiedChapters: EditableChapter[]): ChapterValidationRequest {
   return {
-    source_chapters: sourceChapters.map(({ id, title, start_page }) => ({ id, title, start_page })),
-    modified_chapters: modifiedChapters.map(({ id, title, start_page }) => ({ id, title, start_page })),
+    source_chapters: sourceChapters.map(({ id, title, start_page, start_y, level, parent_id, path }) => ({
+      id,
+      title,
+      start_page,
+      start_y,
+      level,
+      parent_id,
+      path,
+    })),
+    modified_chapters: modifiedChapters.map(({ id, title, start_page, start_y, level, parent_id, path }) => ({
+      id,
+      title,
+      start_page,
+      start_y,
+      level,
+      parent_id,
+      path,
+    })),
   };
 }
 
@@ -173,6 +208,10 @@ export function ChapterConfirmPage({ analysisId, result, onConfirmed, onCancel }
           id: `${side}-manual-${crypto.randomUUID()}`,
           title: `Chapter ${items.length + 1}`,
           start_page: Math.min(Math.max(lastStart + 1, 0), Math.max(totalPages - 1, 0)),
+          start_y: null,
+          level: 1,
+          parent_id: null,
+          path: [`Chapter ${items.length + 1}`],
           source: 'manual',
           confidence: 'low',
         },

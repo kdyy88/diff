@@ -43,6 +43,9 @@ CHAPTER_NUMBERING_RE = re.compile(
 class _ChapterCandidate:
     text: str
     start_page: int
+    start_y: float | None
+    level: int
+    path: list[str]
     source: str
     confidence: str
 
@@ -52,10 +55,17 @@ class ChapterExecutionPair:
     chapter_id: str
     chapter_title: str
     chapter_index: int
+    chapter_level: int
+    chapter_path: list[str]
+    parent_id: str | None
     source_start_page: int
     source_end_page: int
     modified_start_page: int
     modified_end_page: int
+    source_start_y: float | None = None
+    source_end_y: float | None = None
+    modified_start_y: float | None = None
+    modified_end_y: float | None = None
 
 
 @dataclass(slots=True)
@@ -101,6 +111,10 @@ def normalize_chapter_title(title: str) -> str:
     return " ".join(stripped.split())
 
 
+def _normalize_path(path: list[str]) -> list[str]:
+    return [normalize_chapter_title(item) for item in path if normalize_chapter_title(item)]
+
+
 def _make_chapter_id(side: str, index: int) -> str:
     return f"{side}-chapter-{index}"
 
@@ -111,26 +125,47 @@ def _build_plan_from_candidates(
     candidates: list[_ChapterCandidate],
 ) -> DocumentChapterPlan:
     chapters: list[ChapterDraft] = []
-    ordered = sorted(candidates, key=lambda item: (item.start_page, item.text.lower()))
+    ordered = sorted(candidates, key=lambda item: (item.start_page, item.start_y or 0.0, item.level, item.text.lower()))
+    latest_level_one_id: str | None = None
     for index, candidate in enumerate(ordered):
-        end_page = ordered[index + 1].start_page - 1 if index + 1 < len(ordered) else total_pages - 1
+        next_candidate = ordered[index + 1] if index + 1 < len(ordered) else None
+        if next_candidate is None:
+            end_page = total_pages - 1
+            end_y = None
+        elif next_candidate.start_page == candidate.start_page:
+            end_page = candidate.start_page
+            end_y = next_candidate.start_y
+        else:
+            end_page = next_candidate.start_page - 1
+            end_y = None
         title = candidate.text.strip() or f"Chapter {index + 1}"
+        chapter_id = _make_chapter_id(side, index)
+        parent_id = latest_level_one_id if candidate.level > 1 else None
         chapters.append(
             ChapterDraft(
-                id=_make_chapter_id(side, index),
+                id=chapter_id,
                 title=title,
                 normalized_title=normalize_chapter_title(title),
+                normalized_path=_normalize_path(candidate.path or [title]),
                 start_page=candidate.start_page,
                 end_page=end_page,
+                start_y=candidate.start_y,
+                end_y=end_y,
+                level=candidate.level,
+                parent_id=parent_id,
+                path=candidate.path or [title],
                 source=candidate.source,
                 confidence=candidate.confidence,
             )
         )
+        if candidate.level == 1:
+            latest_level_one_id = chapter_id
     return DocumentChapterPlan(side=side, total_pages=total_pages, chapters=chapters)
 
 
 def _normalize_bookmark_entries(raw_toc: list[list[object]], total_pages: int) -> list[_ChapterCandidate]:
     candidates: list[_ChapterCandidate] = []
+    current_path: list[str] = []
     for entry in raw_toc:
         if len(entry) < 3:
             continue
@@ -138,12 +173,18 @@ def _normalize_bookmark_entries(raw_toc: list[list[object]], total_pages: int) -
         title = str(entry[1]).strip()
         page = entry[2]
         dest = entry[3] if len(entry) > 3 else None
-        if level != 1 or not title:
+        if not isinstance(level, int) or level < 1 or not title:
+            continue
+        if level > 2:
             continue
 
         start_page: int | None = None
+        start_y: float | None = None
         if isinstance(dest, dict) and isinstance(dest.get("page"), int):
             start_page = int(dest["page"])
+            point = dest.get("to")
+            if point is not None and hasattr(point, "y"):
+                start_y = float(point.y)
         elif isinstance(page, int):
             start_page = page - 1
         elif isinstance(page, float):
@@ -151,21 +192,42 @@ def _normalize_bookmark_entries(raw_toc: list[list[object]], total_pages: int) -
 
         if start_page is None or start_page < 0 or start_page >= total_pages:
             continue
+
+        if level == 1:
+            current_path = [title]
+        else:
+            parent_title = current_path[0] if current_path else None
+            current_path = ([parent_title] if parent_title else []) + [title]
+
         candidates.append(
             _ChapterCandidate(
                 text=title,
                 start_page=start_page,
+                start_y=start_y,
+                level=level,
+                path=current_path.copy(),
                 source="bookmark",
                 confidence="high",
             )
         )
 
     deduped: list[_ChapterCandidate] = []
-    seen_pages: set[int] = set()
-    for candidate in sorted(candidates, key=lambda item: (item.start_page, item.text.lower())):
-        if candidate.start_page in seen_pages:
+    seen_positions: set[tuple[int, int, str]] = set()
+    seen_ambiguous_positions: set[tuple[int, int]] = set()
+    for candidate in sorted(candidates, key=lambda item: (item.start_page, item.start_y or 0.0, item.level, item.text.lower())):
+        ambiguous_key = (candidate.start_page, candidate.level)
+        if candidate.start_y is None and ambiguous_key in seen_ambiguous_positions:
             continue
-        seen_pages.add(candidate.start_page)
+        if candidate.start_y is None:
+            seen_ambiguous_positions.add(ambiguous_key)
+        dedupe_key = (
+            candidate.start_page,
+            round(candidate.start_y or 0.0),
+            "/".join(_normalize_path(candidate.path or [candidate.text])),
+        )
+        if dedupe_key in seen_positions:
+            continue
+        seen_positions.add(dedupe_key)
         deduped.append(candidate)
 
     if deduped and 0 < deduped[0].start_page < total_pages:
@@ -174,6 +236,9 @@ def _normalize_bookmark_entries(raw_toc: list[list[object]], total_pages: int) -
             _ChapterCandidate(
                 text="Front Matter",
                 start_page=0,
+                start_y=None,
+                level=1,
+                path=["Front Matter"],
                 source="synthetic",
                 confidence="medium",
             ),
@@ -201,6 +266,9 @@ def analyze_docx_heading_plan(docx_path: str | Path, side: str) -> DocumentChapt
         _ChapterCandidate(
             text=block.text,
             start_page=block.index,
+            start_y=None,
+            level=1,
+            path=[block.text],
             source="heading",
             confidence="high",
         )
@@ -217,6 +285,9 @@ def analyze_docx_heading_plan(docx_path: str | Path, side: str) -> DocumentChapt
             _ChapterCandidate(
                 text="Front Matter",
                 start_page=0,
+                start_y=None,
+                level=1,
+                path=["Front Matter"],
                 source="synthetic",
                 confidence="medium",
             ),
@@ -256,13 +327,24 @@ def _hydrate_confirmed_plan(
     side: str,
     total_pages: int,
     request_items: list[ChapterValidationRequestItem],
+    seed_plan: DocumentChapterPlan | None = None,
 ) -> tuple[DocumentChapterPlan, list[ChapterValidationIssue]]:
     issues: list[ChapterValidationIssue] = []
     chapters: list[ChapterDraft] = []
     previous_start: int | None = None
+    previous_y: float | None = None
+    seed_by_id = {chapter.id: chapter for chapter in (seed_plan.chapters if seed_plan else [])}
 
     for index, item in enumerate(request_items):
         title = item.title.strip() or f"Chapter {index + 1}"
+        seed = seed_by_id.get(item.id)
+        seed_title_changed = seed is not None and title != seed.title
+        path = item.path or (seed.path if seed else []) or [title]
+        if seed_title_changed and path:
+            path = [*path[:-1], title]
+        level = item.level or (seed.level if seed else 1)
+        start_y = item.start_y if item.start_y is not None else (seed.start_y if seed else None)
+        parent_id = item.parent_id if item.parent_id is not None else (seed.parent_id if seed else None)
         normalized_title = normalize_chapter_title(title)
         start_page = item.start_page
         if start_page < 0 or start_page >= total_pages:
@@ -276,7 +358,14 @@ def _hydrate_confirmed_plan(
                     normalized_title=normalized_title,
                 )
             )
-        if previous_start is not None and start_page <= previous_start:
+        same_page_with_forward_y = (
+            previous_start is not None
+            and start_page == previous_start
+            and previous_y is not None
+            and start_y is not None
+            and start_y > previous_y
+        )
+        if previous_start is not None and start_page <= previous_start and not same_page_with_forward_y:
             issues.append(
                 ChapterValidationIssue(
                     code="non_increasing_start",
@@ -292,13 +381,20 @@ def _hydrate_confirmed_plan(
                 id=item.id,
                 title=title,
                 normalized_title=normalized_title,
+                normalized_path=_normalize_path(path),
                 start_page=start_page,
                 end_page=start_page,
+                start_y=start_y,
+                end_y=None,
+                level=level,
+                parent_id=parent_id,
+                path=path,
                 source="manual",
-                confidence="low",
+                confidence=seed.confidence if seed and not seed_title_changed and start_page == seed.start_page else "low",
             )
         )
         previous_start = start_page
+        previous_y = start_y
 
     if chapters:
         if chapters[0].start_page != 0:
@@ -314,7 +410,13 @@ def _hydrate_confirmed_plan(
             )
         for index, chapter in enumerate(chapters):
             next_start = chapters[index + 1].start_page if index + 1 < len(chapters) else total_pages
-            chapter.end_page = next_start - 1
+            next_chapter = chapters[index + 1] if index + 1 < len(chapters) else None
+            if next_chapter and next_chapter.start_page == chapter.start_page:
+                chapter.end_page = chapter.start_page
+                chapter.end_y = next_chapter.start_y
+            else:
+                chapter.end_page = next_start - 1
+                chapter.end_y = None
             if chapter.end_page < chapter.start_page:
                 issues.append(
                     ChapterValidationIssue(
@@ -344,7 +446,8 @@ def _hydrate_confirmed_plan(
 def _add_duplicate_title_issues(plan: DocumentChapterPlan, issues: list[ChapterValidationIssue]) -> None:
     titles: dict[str, list[ChapterDraft]] = {}
     for chapter in plan.chapters:
-        titles.setdefault(chapter.normalized_title, []).append(chapter)
+        key = "/".join(chapter.normalized_path) if chapter.normalized_path else chapter.normalized_title
+        titles.setdefault(key, []).append(chapter)
     for normalized_title, chapters in titles.items():
         if not normalized_title or len(chapters) < 2:
             continue
@@ -361,13 +464,18 @@ def _add_duplicate_title_issues(plan: DocumentChapterPlan, issues: list[ChapterV
             )
 
 
+def _match_key(chapter: ChapterDraft) -> str:
+    return "/".join(chapter.normalized_path) if chapter.normalized_path else chapter.normalized_title
+
+
 def _closest_peer(chapter: ChapterDraft, peers: list[ChapterDraft]) -> tuple[ChapterDraft | None, float | None]:
     if not peers:
         return None, None
     best_peer: ChapterDraft | None = None
     best_score = -1.0
+    chapter_key = _match_key(chapter)
     for peer in peers:
-        score = SequenceMatcher(None, chapter.normalized_title, peer.normalized_title).ratio()
+        score = SequenceMatcher(None, chapter_key, _match_key(peer)).ratio()
         if score > best_score:
             best_score = score
             best_peer = peer
@@ -379,16 +487,20 @@ def validate_chapter_match(
     *,
     source_total_pages: int,
     modified_total_pages: int,
+    source_seed_plan: DocumentChapterPlan | None = None,
+    modified_seed_plan: DocumentChapterPlan | None = None,
 ) -> ChapterValidationResult:
     source_plan, issues = _hydrate_confirmed_plan(
         side="source",
         total_pages=source_total_pages,
         request_items=payload.source_chapters,
+        seed_plan=source_seed_plan,
     )
     modified_plan, modified_issues = _hydrate_confirmed_plan(
         side="modified",
         total_pages=modified_total_pages,
         request_items=payload.modified_chapters,
+        seed_plan=modified_seed_plan,
     )
     issues.extend(modified_issues)
 
@@ -396,11 +508,11 @@ def validate_chapter_match(
     _add_duplicate_title_issues(modified_plan, issues)
 
     if not issues:
-        source_titles = {chapter.normalized_title: chapter for chapter in source_plan.chapters}
-        modified_titles = {chapter.normalized_title: chapter for chapter in modified_plan.chapters}
+        source_titles = {_match_key(chapter): chapter for chapter in source_plan.chapters}
+        modified_titles = {_match_key(chapter): chapter for chapter in modified_plan.chapters}
 
         for chapter in source_plan.chapters:
-            if chapter.normalized_title in modified_titles:
+            if _match_key(chapter) in modified_titles:
                 continue
             peer, score = _closest_peer(chapter, modified_plan.chapters)
             issues.append(
@@ -418,7 +530,7 @@ def validate_chapter_match(
                 )
             )
         for chapter in modified_plan.chapters:
-            if chapter.normalized_title in source_titles:
+            if _match_key(chapter) in source_titles:
                 continue
             peer, score = _closest_peer(chapter, source_plan.chapters)
             issues.append(
@@ -445,16 +557,23 @@ def validate_chapter_match(
 
 
 def build_execution_pairs(validation: ChapterValidationResult) -> list[ChapterExecutionPair]:
-    modified_by_title = {chapter.normalized_title: chapter for chapter in validation.modified_plan.chapters}
+    modified_by_title = {_match_key(chapter): chapter for chapter in validation.modified_plan.chapters}
     return [
         ChapterExecutionPair(
             chapter_id=chapter.id,
             chapter_title=chapter.title,
             chapter_index=index,
+            chapter_level=chapter.level,
+            chapter_path=chapter.path,
+            parent_id=chapter.parent_id,
             source_start_page=chapter.start_page,
             source_end_page=chapter.end_page,
-            modified_start_page=modified_by_title[chapter.normalized_title].start_page,
-            modified_end_page=modified_by_title[chapter.normalized_title].end_page,
+            modified_start_page=modified_by_title[_match_key(chapter)].start_page,
+            modified_end_page=modified_by_title[_match_key(chapter)].end_page,
+            source_start_y=chapter.start_y,
+            source_end_y=chapter.end_y,
+            modified_start_y=modified_by_title[_match_key(chapter)].start_y,
+            modified_end_y=modified_by_title[_match_key(chapter)].end_y,
         )
         for index, chapter in enumerate(validation.source_plan.chapters)
     ]
@@ -483,6 +602,8 @@ def aggregate_chapter_results(
                         "chapter_id": pair.chapter_id,
                         "chapter_title": pair.chapter_title,
                         "chapter_index": pair.chapter_index,
+                        "chapter_level": pair.chapter_level,
+                        "chapter_path": pair.chapter_path,
                     }
                 )
             )
@@ -496,6 +617,9 @@ def aggregate_chapter_results(
                 "id": pair.chapter_id,
                 "title": pair.chapter_title,
                 "index": pair.chapter_index,
+                "level": pair.chapter_level,
+                "parent_id": pair.parent_id,
+                "path": pair.chapter_path,
                 "anchor_count": len(result.anchors),
                 "first_anchor_id": first_anchor_id,
                 "summary": result.summary,
@@ -696,6 +820,8 @@ class ChapterAnalysisStore:
             payload,
             source_total_pages=result.source_plan.total_pages,
             modified_total_pages=result.modified_plan.total_pages,
+            source_seed_plan=result.source_plan,
+            modified_seed_plan=result.modified_plan,
         )
 
     async def confirm(self, analysis_id: str, payload: ChapterValidationRequest, create_job_from_paths) -> CreateJobResponse:

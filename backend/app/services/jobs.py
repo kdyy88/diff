@@ -13,7 +13,7 @@ from app.models.schemas import CreateJobResponse, DiffResult, JobStatus
 from app.services.chapters import ChapterExecutionPair, aggregate_chapter_results
 from app.services.document_kind import UploadedDocument
 from app.services.differ import compare_documents
-from app.services.extractor import extract_document, extract_page_infos
+from app.services.extractor import SectionWindow, extract_document, extract_page_infos, slice_document_projection
 from app.services.markdown_bundle import build_markdown_bundle
 
 
@@ -248,6 +248,16 @@ class JobStore:
 
         source_pages = extract_page_infos(job.source_path)
         modified_pages = extract_page_infos(job.modified_path)
+        source_projection = extract_document(
+            job.source_path,
+            header_margin=job.header_margin,
+            footer_margin=job.footer_margin,
+        )
+        modified_projection = extract_document(
+            job.modified_path,
+            header_margin=job.header_margin,
+            footer_margin=job.footer_margin,
+        )
         chapter_results: list[tuple[ChapterExecutionPair, DiffResult]] = []
         total_pairs = len(job.chapter_pairs)
 
@@ -255,25 +265,31 @@ class JobStore:
             job.status = "extracting"
             job.stage = f"extracting chapter {index}/{total_pairs}"
             job.progress = 10 + int(((index - 1) / total_pairs) * 70)
-            source_projection = extract_document(
-                job.source_path,
-                header_margin=job.header_margin,
-                footer_margin=job.footer_margin,
-                page_range=(pair.source_start_page, pair.source_end_page),
+            source_window = slice_document_projection(
+                source_projection,
+                SectionWindow(
+                    start_page=pair.source_start_page,
+                    end_page=pair.source_end_page,
+                    start_y=pair.source_start_y,
+                    end_y=pair.source_end_y,
+                ),
             )
-            modified_projection = extract_document(
-                job.modified_path,
-                header_margin=job.header_margin,
-                footer_margin=job.footer_margin,
-                page_range=(pair.modified_start_page, pair.modified_end_page),
+            modified_window = slice_document_projection(
+                modified_projection,
+                SectionWindow(
+                    start_page=pair.modified_start_page,
+                    end_page=pair.modified_end_page,
+                    start_y=pair.modified_start_y,
+                    end_y=pair.modified_end_y,
+                ),
             )
 
             job.status = "aligning"
             job.stage = f"aligning chapter {index}/{total_pairs}"
             job.progress = 10 + int(((index - 0.35) / total_pairs) * 70)
             diff_result = compare_documents(
-                source_projection,
-                modified_projection,
+                source_window,
+                modified_window,
                 include_reflow=job.include_reflow,
             )
 

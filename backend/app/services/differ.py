@@ -10,7 +10,7 @@ from patiencediff import PatienceSequenceMatcher
 from app.core.config import REFLOW_MIN_CHARS, REFLOW_MIN_DELTA_Y
 from app.models.schemas import DiffAnchor, DiffResult, DiffSummary, HighlightFragment, PageMeta, TableContext
 from app.services.extractor import CharAtom, DocumentProjection, TableCell, TableRegion, TextSegment
-from app.services.projector import project_bbox, project_dom_fragment, project_range
+from app.services.projector import LARGE_REGION_MIN_WORDS, project_bbox, project_dom_fragment, project_large_range, project_range, range_word_count
 
 
 DIFF_DELETE = -1
@@ -572,6 +572,14 @@ def _should_merge_review_candidates(
     document_a: DocumentProjection,
     document_b: DocumentProjection,
 ) -> bool:
+    if previous.kind == current.kind == "insert":
+        gap_b = _range_gap(previous.start_b, previous.end_b, current.start_b, current.end_b)
+        return gap_b is not None and gap_b <= 8 and _can_bridge_gap(document_b, previous.end_b or 0, current.start_b or 0)
+
+    if previous.kind == current.kind == "delete":
+        gap_a = _range_gap(previous.start_a, previous.end_a, current.start_a, current.end_a)
+        return gap_a is not None and gap_a <= 8 and _can_bridge_gap(document_a, previous.end_a or 0, current.start_a or 0)
+
     if previous.kind != "replace" or current.kind != "replace":
         return False
 
@@ -596,6 +604,24 @@ def _merge_review_candidates(
     left: _ReviewAnchorCandidate,
     right: _ReviewAnchorCandidate,
 ) -> _ReviewAnchorCandidate:
+    if left.kind == right.kind == "insert":
+        return _ReviewAnchorCandidate(
+            kind="insert",
+            start_a=None,
+            end_a=None,
+            start_b=min(value for value in [left.start_b, right.start_b] if value is not None),
+            end_b=max(value for value in [left.end_b, right.end_b] if value is not None),
+            raw_event_count=left.raw_event_count + right.raw_event_count,
+        )
+    if left.kind == right.kind == "delete":
+        return _ReviewAnchorCandidate(
+            kind="delete",
+            start_a=min(value for value in [left.start_a, right.start_a] if value is not None),
+            end_a=max(value for value in [left.end_a, right.end_a] if value is not None),
+            start_b=None,
+            end_b=None,
+            raw_event_count=left.raw_event_count + right.raw_event_count,
+        )
     return _ReviewAnchorCandidate(
         kind="replace",
         start_a=min(value for value in [left.start_a, right.start_a] if value is not None),
@@ -641,8 +667,19 @@ def _anchor_from_candidate(
     index: int,
     confidence: str = "high",
 ) -> DiffAnchor:
-    left_projection = project_range(document_a, candidate.start_a, candidate.end_a)
-    right_projection = project_range(document_b, candidate.start_b, candidate.end_b)
+    large_left = candidate.kind in {"delete", "replace"} and range_word_count(document_a, candidate.start_a, candidate.end_a) >= LARGE_REGION_MIN_WORDS
+    large_right = candidate.kind in {"insert", "replace"} and range_word_count(document_b, candidate.start_b, candidate.end_b) >= LARGE_REGION_MIN_WORDS
+    is_large_region = large_left or large_right
+    left_projection = (
+        project_large_range(document_a, candidate.start_a, candidate.end_a)
+        if large_left
+        else project_range(document_a, candidate.start_a, candidate.end_a)
+    )
+    right_projection = (
+        project_large_range(document_b, candidate.start_b, candidate.end_b)
+        if large_right
+        else project_range(document_b, candidate.start_b, candidate.end_b)
+    )
 
     excerpt_left = _contextual_excerpt(document_a, candidate.start_a, candidate.end_a)
     excerpt_right = _contextual_excerpt(document_b, candidate.start_b, candidate.end_b)
@@ -660,6 +697,7 @@ def _anchor_from_candidate(
         right_range=right_projection.char_range,
         raw_event_count=candidate.raw_event_count,
         group_key=f"text-group-{index}",
+        is_large_region=is_large_region,
     )
 
 

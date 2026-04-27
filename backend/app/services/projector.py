@@ -7,6 +7,7 @@ from app.services.extractor import CharAtom, DocumentProjection
 
 
 MERGE_GAP = 10.0
+LARGE_REGION_MIN_WORDS = 30
 
 
 @dataclass(slots=True)
@@ -60,6 +61,66 @@ def _real_char_slice(
         for char in document.chars[start:end]
         if not char.synthetic and char.char.strip() and (char.bbox is not None or char.dom_id is not None)
     ]
+
+
+def _word_count(chars: list[CharAtom]) -> int:
+    count = 0
+    in_word = False
+    for char in chars:
+        if char.synthetic or not char.char.strip():
+            in_word = False
+            continue
+        if not in_word:
+            count += 1
+            in_word = True
+    return count
+
+
+def range_word_count(document: DocumentProjection, start: int | None, end: int | None) -> int:
+    if start is None or end is None or start >= end:
+        return 0
+    return _word_count(document.chars[start:end])
+
+
+def project_large_range(
+    document: DocumentProjection,
+    start: int | None,
+    end: int | None,
+) -> FragmentProjection:
+    real_chars = _real_char_slice(document, start, end)
+    if not real_chars:
+        return FragmentProjection(fragments=[], excerpt="", char_range=None)
+    if document.document_kind != "pdf":
+        return project_range(document, start, end)
+
+    chars_by_page: dict[int, list[CharAtom]] = {}
+    for char in real_chars:
+        chars_by_page.setdefault(char.page, []).append(char)
+
+    fragments: list[HighlightFragment] = []
+    for page, page_chars in sorted(chars_by_page.items()):
+        bboxes = [char.bbox for char in page_chars if char.bbox is not None]
+        if not bboxes:
+            continue
+        x0 = min(bbox[0] for bbox in bboxes)
+        y0 = min(bbox[1] for bbox in bboxes)
+        x1 = max(bbox[2] for bbox in bboxes)
+        y1 = max(bbox[3] for bbox in bboxes)
+        fragments.append(
+            HighlightFragment(
+                kind="pdf",
+                page=page,
+                bbox=[x0, y0, x1, y1],
+                viewport_ref=f"page-{page}-large-region-{len(fragments)}",
+            )
+        )
+
+    excerpt = "".join(char.char for char in real_chars[:80]).strip()
+    return FragmentProjection(
+        fragments=fragments,
+        excerpt=excerpt,
+        char_range=CharRange(start=start, end=end),
+    )
 
 
 def project_range(

@@ -4,7 +4,7 @@ import tempfile
 from docx import Document as DocxDocument
 import fitz
 
-from app.services.extractor import extract_document
+from app.services.extractor import SectionWindow, extract_document, slice_document_projection
 from app.services.extractor import _clean_cell_text
 from app.services.extractor import _should_keep_extracted_char
 from app.services.normalizer import normalize_char
@@ -94,3 +94,24 @@ def test_extract_document_builds_docx_projection_without_table_text_duplication(
     assert projection.tables[0].cells[0].dom_id == "table-2-r0-c0"
     assert projection.review_html is not None
     assert 'data-dom-id="heading-0"' in projection.review_html
+
+
+def test_slice_document_projection_uses_same_page_y_window() -> None:
+    path = Path(tempfile.gettempdir()) / "extractor-section-window-test.pdf"
+    doc = fitz.open()
+    page = doc.new_page(width=400, height=500)
+    page.insert_text((72, 80), "Chapter heading")
+    page.insert_text((72, 150), "section alpha")
+    page.insert_text((72, 260), "section beta")
+    doc.save(path)
+    doc.close()
+
+    projection = extract_document(path, header_margin=0, footer_margin=0)
+    section = slice_document_projection(
+        projection,
+        SectionWindow(start_page=0, end_page=0, start_y=120, end_y=220),
+    )
+
+    assert "section alpha" in section.raw_text
+    assert "Chapter heading" not in section.raw_text
+    assert "section beta" not in section.raw_text

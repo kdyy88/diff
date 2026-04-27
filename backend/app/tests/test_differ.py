@@ -534,6 +534,20 @@ def test_compare_documents_marks_large_replace_windows_low_confidence() -> None:
     assert all(anchor.confidence == "low" for anchor in text_anchors)
 
 
+def test_compare_documents_merges_large_insert_region_into_page_bbox() -> None:
+    inserted_words = [f"word{index}" for index in range(35)]
+    left = _build_wrapped_document(["Prefix", "Suffix"])
+    right = _build_wrapped_document(["Prefix", " ".join(inserted_words[:18]), " ".join(inserted_words[18:]), "Suffix"])
+
+    result = compare_documents(left, right, include_reflow=False)
+    insert_anchor = next(anchor for anchor in result.anchors if anchor.kind == "insert")
+
+    assert insert_anchor.is_large_region
+    assert len(insert_anchor.right_fragments) == 1
+    assert insert_anchor.right_fragments[0].bbox is not None
+    assert insert_anchor.right_fragments[0].bbox[3] > insert_anchor.right_fragments[0].bbox[1]
+
+
 def test_compare_documents_emits_table_cell_anchor() -> None:
     left_path = Path(tempfile.gettempdir()) / "table-left.pdf"
     right_path = Path(tempfile.gettempdir()) / "table-right.pdf"

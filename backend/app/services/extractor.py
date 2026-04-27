@@ -108,6 +108,14 @@ class DocumentProjection:
 
 
 @dataclass(slots=True)
+class SectionWindow:
+    start_page: int
+    end_page: int
+    start_y: float | None = None
+    end_y: float | None = None
+
+
+@dataclass(slots=True)
 class _RawLine:
     page: int
     block: int
@@ -415,6 +423,175 @@ def _build_aligned_text(chars: list[CharAtom]) -> tuple[str, list[int]]:
         previous_was_space = False
 
     return "".join(aligned_chars), aligned_to_raw
+
+
+def _copy_char(char: CharAtom, stream_index: int) -> CharAtom:
+    return CharAtom(
+        id=f"c-{stream_index}",
+        char=char.char,
+        norm_char=char.norm_char,
+        page=char.page,
+        bbox=char.bbox,
+        block=char.block,
+        line=char.line,
+        word=char.word,
+        stream_index=stream_index,
+        synthetic=char.synthetic,
+        dom_id=char.dom_id,
+        dom_char_index=char.dom_char_index,
+    )
+
+
+def _bbox_center_y(bbox: tuple[float, float, float, float]) -> float:
+    return (bbox[1] + bbox[3]) / 2
+
+
+def _position_in_window(
+    *,
+    page: int,
+    y: float | None,
+    window: SectionWindow,
+) -> bool:
+    if page < window.start_page or page > window.end_page:
+        return False
+    if y is None:
+        return True
+    if page == window.start_page and window.start_y is not None and y < window.start_y:
+        return False
+    if page == window.end_page and window.end_y is not None and y >= window.end_y:
+        return False
+    return True
+
+
+def _segment_in_window(segment: TextSegment, window: SectionWindow) -> bool:
+    return _position_in_window(
+        page=segment.page,
+        y=_bbox_center_y(segment.bbox),
+        window=window,
+    )
+
+
+def _table_in_window(table: TableRegion, window: SectionWindow) -> bool:
+    if table.bbox is None:
+        return window.start_page <= table.page <= window.end_page
+    return _position_in_window(
+        page=table.page,
+        y=_bbox_center_y(table.bbox),
+        window=window,
+    )
+
+
+def slice_document_projection(document: DocumentProjection, window: SectionWindow) -> DocumentProjection:
+    """Return a lightweight projection constrained to a TOC section window."""
+    if document.document_kind == "docx":
+        return document
+
+    kept_segments = [segment for segment in document.text_segments if _segment_in_window(segment, window)]
+    if kept_segments:
+        kept_raw_ranges = [(segment.raw_start, segment.raw_end) for segment in kept_segments]
+        kept_indexes = {
+            raw_index
+            for start, end in kept_raw_ranges
+            for raw_index in range(start, end)
+        }
+    else:
+        kept_indexes = {
+            index
+            for index, char in enumerate(document.chars)
+            if _position_in_window(
+                page=char.page,
+                y=_bbox_center_y(char.bbox) if char.bbox is not None else None,
+                window=window,
+            )
+        }
+
+    index_map: dict[int, int] = {}
+    chars: list[CharAtom] = []
+    for old_index, char in enumerate(document.chars):
+        if old_index not in kept_indexes:
+            continue
+        next_index = len(chars)
+        index_map[old_index] = next_index
+        chars.append(_copy_char(char, next_index))
+
+    text_segments: list[TextSegment] = []
+    for segment in kept_segments:
+        mapped_indexes = [
+            index_map[old_index]
+            for old_index in range(segment.raw_start, segment.raw_end)
+            if old_index in index_map
+        ]
+        if not mapped_indexes:
+            continue
+        raw_start = min(mapped_indexes)
+        raw_end = max(mapped_indexes) + 1
+        segment_chars = chars[raw_start:raw_end]
+        aligned_text = _aligned_text_from_atoms(segment_chars)
+        if not aligned_text:
+            continue
+        text_segments.append(
+            TextSegment(
+                id=f"segment-{len(text_segments)}",
+                page=segment.page,
+                block=segment.block,
+                line=segment.line,
+                bbox=segment.bbox,
+                raw_text="".join(char.char for char in segment_chars),
+                aligned_text=aligned_text,
+                raw_start=raw_start,
+                raw_end=raw_end,
+                dom_id=segment.dom_id,
+            )
+        )
+
+    words: list[WordAtom] = []
+    for word in document.words:
+        mapped_indexes = [
+            index_map[old_index]
+            for old_index in range(word.char_start, word.char_end)
+            if old_index in index_map
+        ]
+        if not mapped_indexes:
+            continue
+        words.append(
+            WordAtom(
+                id=f"w-{len(words)}",
+                text=word.text,
+                norm_text=word.norm_text,
+                page=word.page,
+                bbox=word.bbox,
+                block=word.block,
+                line=word.line,
+                word=word.word,
+                char_start=min(mapped_indexes),
+                char_end=max(mapped_indexes) + 1,
+            )
+        )
+
+    pages = [
+        page
+        for page in document.pages
+        if window.start_page <= page.page <= window.end_page
+    ]
+    tables = [table for table in document.tables if _table_in_window(table, window)]
+    raw_text = "".join(char.char for char in chars)
+    normalized_text = "".join(char.norm_char for char in chars)
+    aligned_text, aligned_to_raw = _build_aligned_text(chars)
+
+    return DocumentProjection(
+        pdf_path=document.pdf_path,
+        document_kind=document.document_kind,
+        pages=pages,
+        chars=chars,
+        words=words,
+        tables=tables,
+        text_segments=text_segments,
+        raw_text=raw_text,
+        normalized_text=normalized_text,
+        aligned_text=aligned_text,
+        aligned_to_raw=aligned_to_raw,
+        review_html=None,
+    )
 
 
 def _aligned_text_from_atoms(chars: list[CharAtom]) -> str:

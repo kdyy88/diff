@@ -107,6 +107,30 @@ function expectArray(value: unknown, context: string): unknown[] {
   return value;
 }
 
+function expectStringArray(value: unknown, context: string): string[] {
+  return expectArray(value, context).map((item, index) => expectString(item, `${context}[${index}]`));
+}
+
+function optionalNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && !Number.isNaN(value) ? value : fallback;
+}
+
+function optionalNullableNumber(value: unknown): number | null {
+  return value === null || value === undefined ? null : expectNumber(value, 'optional number');
+}
+
+function optionalNullableString(value: unknown): string | null {
+  return value === null || value === undefined ? null : expectString(value, 'optional string');
+}
+
+function optionalStringArray(value: unknown): string[] {
+  return value === undefined ? [] : expectStringArray(value, 'optional string array');
+}
+
+function optionalBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
 function expectOneOf<T extends readonly string[]>(value: unknown, allowed: T, context: string): T[number] {
   const nextValue = expectString(value, context);
   if (!allowed.includes(nextValue)) {
@@ -218,6 +242,9 @@ function parseDiffAnchor(value: unknown, context: string) {
     chapter_id: expectNullableString(record.chapter_id, `${context}.chapter_id`),
     chapter_title: expectNullableString(record.chapter_title, `${context}.chapter_title`),
     chapter_index: expectNullableNumber(record.chapter_index, `${context}.chapter_index`),
+    chapter_level: optionalNullableNumber(record.chapter_level),
+    chapter_path: optionalStringArray(record.chapter_path),
+    is_large_region: optionalBoolean(record.is_large_region, false),
   };
 }
 
@@ -227,6 +254,9 @@ function parseChapterDiffSummary(value: unknown, context: string) {
     id: expectString(record.id, `${context}.id`),
     title: expectString(record.title, `${context}.title`),
     index: expectNumber(record.index, `${context}.index`),
+    level: optionalNumber(record.level, 1),
+    parent_id: optionalNullableString(record.parent_id),
+    path: optionalStringArray(record.path),
     anchor_count: expectNumber(record.anchor_count, `${context}.anchor_count`),
     first_anchor_id: expectNullableString(record.first_anchor_id, `${context}.first_anchor_id`),
     summary: parseDiffSummary(record.summary, `${context}.summary`),
@@ -266,8 +296,14 @@ function parseChapterDraft(value: unknown, context: string) {
     id: expectString(record.id, `${context}.id`),
     title: expectString(record.title, `${context}.title`),
     normalized_title: expectString(record.normalized_title, `${context}.normalized_title`),
+    normalized_path: optionalStringArray(record.normalized_path),
     start_page: expectNumber(record.start_page, `${context}.start_page`),
     end_page: expectNumber(record.end_page, `${context}.end_page`),
+    start_y: optionalNullableNumber(record.start_y),
+    end_y: optionalNullableNumber(record.end_y),
+    level: optionalNumber(record.level, 1),
+    parent_id: optionalNullableString(record.parent_id),
+    path: optionalStringArray(record.path),
     source: expectOneOf(record.source, CHAPTER_SOURCES, `${context}.source`) as ChapterSource,
     confidence: expectOneOf(record.confidence, CHAPTER_CONFIDENCE_LEVELS, `${context}.confidence`) as ChapterConfidenceLevel,
   };

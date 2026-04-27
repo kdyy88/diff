@@ -67,8 +67,9 @@ def test_normalize_bookmark_entries_prefers_dest_page_and_injects_front_matter()
 
     candidates = _normalize_bookmark_entries(entries, total_pages=12)
 
-    assert [candidate.text for candidate in candidates] == ['Front Matter', 'Chapter 1', 'Chapter 2']
-    assert [candidate.start_page for candidate in candidates] == [0, 3, 8]
+    assert [candidate.text for candidate in candidates] == ['Front Matter', 'Chapter 1', 'Ignored subsection', 'Chapter 2']
+    assert [candidate.start_page for candidate in candidates] == [0, 3, 7, 8]
+    assert [candidate.level for candidate in candidates] == [1, 1, 2, 1]
     assert candidates[1].source == 'bookmark'
 
 
@@ -81,6 +82,20 @@ def test_normalize_bookmark_entries_drops_invalid_pages_without_front_matter() -
     candidates = _normalize_bookmark_entries(entries, total_pages=10)
 
     assert candidates == []
+
+
+def test_normalize_bookmark_entries_keeps_same_page_entries_when_y_differs() -> None:
+    entries = [
+        [1, 'Chapter 1', 1, {'page': 0, 'to': fitz.Point(72, 80)}],
+        [2, 'Method', 1, {'page': 0, 'to': fitz.Point(72, 180)}],
+        [2, 'Results', 1, {'page': 0, 'to': fitz.Point(72, 320)}],
+    ]
+
+    candidates = _normalize_bookmark_entries(entries, total_pages=2)
+
+    assert [candidate.text for candidate in candidates] == ['Chapter 1', 'Method', 'Results']
+    assert [candidate.level for candidate in candidates] == [1, 2, 2]
+    assert [candidate.start_y for candidate in candidates] == [80.0, 180.0, 320.0]
 
 
 def test_validate_chapter_match_reports_duplicates_and_unmatched_suggestion() -> None:
@@ -123,6 +138,9 @@ def test_aggregate_chapter_results_prefixes_anchor_ids_and_keeps_zero_anchor_cha
         chapter_id='source-chapter-0',
         chapter_title='Chapter 1',
         chapter_index=0,
+        chapter_level=1,
+        chapter_path=['Chapter 1'],
+        parent_id=None,
         source_start_page=0,
         source_end_page=1,
         modified_start_page=0,
@@ -132,6 +150,9 @@ def test_aggregate_chapter_results_prefixes_anchor_ids_and_keeps_zero_anchor_cha
         chapter_id='source-chapter-1',
         chapter_title='Chapter 2',
         chapter_index=1,
+        chapter_level=1,
+        chapter_path=['Chapter 2'],
+        parent_id=None,
         source_start_page=2,
         source_end_page=3,
         modified_start_page=2,
