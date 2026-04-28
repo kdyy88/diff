@@ -62,6 +62,24 @@ def test_extract_document_splits_out_explicit_grid_tables() -> None:
     assert "A1" not in projection.raw_text
 
 
+def test_extract_document_filters_repeated_running_headers() -> None:
+    path = Path(tempfile.gettempdir()) / "extractor-running-header-test.pdf"
+    doc = fitz.open()
+    for page_index in range(3):
+        page = doc.new_page(width=400, height=500)
+        page.insert_text((36, 24), f"BeOne BGB-16673-304 A6 CONFIDENTIAL Page {page_index + 1}")
+        page.insert_text((72, 160), f"Unique body line {page_index + 1}")
+    doc.save(path)
+    doc.close()
+
+    projection = extract_document(path, header_margin=0, footer_margin=0)
+
+    assert "CONFIDENTIAL" not in projection.raw_text
+    assert "Unique body line 1" in projection.raw_text
+    assert "Unique body line 2" in projection.raw_text
+    assert "Unique body line 3" in projection.raw_text
+
+
 def test_clean_cell_text_handles_none() -> None:
     assert _clean_cell_text(None) == ""
     assert _clean_cell_text("  Amount  ") == "Amount"

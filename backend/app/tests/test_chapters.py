@@ -19,12 +19,14 @@ from app.models.schemas import (
     DiffSummary,
 )
 from app.services.chapters import (
+    _build_plan_from_candidates,
     _normalize_bookmark_entries,
     ChapterBookmarksUnavailable,
     ChapterExecutionPair,
     aggregate_chapter_results,
     analyze_docx_heading_plan,
     analyze_document_plan,
+    build_execution_pairs,
     validate_chapter_match,
 )
 from app.services.extractor import PageInfo
@@ -67,9 +69,9 @@ def test_normalize_bookmark_entries_prefers_dest_page_and_injects_front_matter()
 
     candidates = _normalize_bookmark_entries(entries, total_pages=12)
 
-    assert [candidate.text for candidate in candidates] == ['Front Matter', 'Chapter 1', 'Ignored subsection', 'Chapter 2']
-    assert [candidate.start_page for candidate in candidates] == [0, 3, 7, 8]
-    assert [candidate.level for candidate in candidates] == [1, 1, 2, 1]
+    assert [candidate.text for candidate in candidates] == ['Front Matter', 'Chapter 1', 'Chapter 1 duplicate', 'Ignored subsection', 'Chapter 2']
+    assert [candidate.start_page for candidate in candidates] == [0, 3, 3, 7, 8]
+    assert [candidate.level for candidate in candidates] == [1, 1, 1, 2, 1]
     assert candidates[1].source == 'bookmark'
 
 
@@ -98,6 +100,26 @@ def test_normalize_bookmark_entries_keeps_same_page_entries_when_y_differs() -> 
     assert [candidate.start_y for candidate in candidates] == [80.0, 180.0, 320.0]
 
 
+def test_bookmark_plan_preserves_deep_parent_paths() -> None:
+    entries = [
+        [1, 'III. Specialty Testing', 1, {'page': 0, 'to': fitz.Point(72, 80)}],
+        [2, 'E. Departmental Testing Requirements', 1, {'page': 0, 'to': fitz.Point(72, 180)}],
+        [3, '1. Hematology', 2, {'page': 1, 'to': fitz.Point(72, 120)}],
+    ]
+
+    candidates = _normalize_bookmark_entries(entries, total_pages=3)
+    plan = _build_plan_from_candidates('source', 3, candidates)
+
+    assert [chapter.level for chapter in plan.chapters] == [1, 2, 3]
+    assert plan.chapters[1].parent_id == plan.chapters[0].id
+    assert plan.chapters[2].parent_id == plan.chapters[1].id
+    assert plan.chapters[2].path == [
+        'III. Specialty Testing',
+        'E. Departmental Testing Requirements',
+        '1. Hematology',
+    ]
+
+
 def test_validate_chapter_match_reports_duplicates_and_unmatched_suggestion() -> None:
     payload = ChapterValidationRequest(
         source_chapters=[
@@ -112,8 +134,9 @@ def test_validate_chapter_match_reports_duplicates_and_unmatched_suggestion() ->
 
     validation = validate_chapter_match(payload, source_total_pages=6, modified_total_pages=6)
 
-    assert validation.can_continue is False
-    assert any(issue.code == 'duplicate_normalized_title' for issue in validation.issues)
+    assert validation.can_continue is True
+    duplicate_issue = next(issue for issue in validation.issues if issue.code == 'duplicate_normalized_title')
+    assert duplicate_issue.severity == 'warning'
 
     unmatched_payload = ChapterValidationRequest(
         source_chapters=[
@@ -129,8 +152,80 @@ def test_validate_chapter_match_reports_duplicates_and_unmatched_suggestion() ->
     unmatched_validation = validate_chapter_match(unmatched_payload, source_total_pages=6, modified_total_pages=6)
     unmatched_issue = next(issue for issue in unmatched_validation.issues if issue.code == 'unmatched_chapter')
 
+    assert unmatched_validation.can_continue is True
+    assert unmatched_issue.severity == 'warning'
     assert unmatched_issue.peer_raw_title == 'Appendix Alpha'
     assert unmatched_issue.suggested_peer_score is not None
+
+
+def test_validate_chapter_match_blocks_duplicate_titles_at_same_position() -> None:
+    payload = ChapterValidationRequest(
+        source_chapters=[
+            ChapterValidationRequestItem(id='s-1', title='Chapter 1 Intro', start_page=0),
+            ChapterValidationRequestItem(id='s-2', title='Chapter 1 Intro', start_page=0),
+        ],
+        modified_chapters=[
+            ChapterValidationRequestItem(id='m-1', title='Chapter 1 Intro', start_page=0),
+        ],
+    )
+
+    validation = validate_chapter_match(payload, source_total_pages=3, modified_total_pages=3)
+
+    assert validation.can_continue is False
+    assert any(issue.code == 'duplicate_normalized_title' and issue.severity == 'error' for issue in validation.issues)
+
+
+def test_validate_chapter_match_allows_same_page_parent_and_child_without_y() -> None:
+    payload = ChapterValidationRequest(
+        source_chapters=[
+            ChapterValidationRequestItem(id='s-1', title='II. Protocol Definition', start_page=0, level=1, path=['II. Protocol Definition']),
+            ChapterValidationRequestItem(
+                id='s-2',
+                title='A. Electronic Data Definition',
+                start_page=0,
+                level=2,
+                parent_id='s-1',
+                path=['II. Protocol Definition', 'A. Electronic Data Definition'],
+            ),
+        ],
+        modified_chapters=[
+            ChapterValidationRequestItem(id='m-1', title='II. Protocol Definition', start_page=0, level=1, path=['II. Protocol Definition']),
+            ChapterValidationRequestItem(
+                id='m-2',
+                title='A. Electronic Data Definition',
+                start_page=0,
+                level=2,
+                parent_id='m-1',
+                path=['II. Protocol Definition', 'A. Electronic Data Definition'],
+            ),
+        ],
+    )
+
+    validation = validate_chapter_match(payload, source_total_pages=2, modified_total_pages=2)
+
+    assert validation.can_continue is True
+    assert not any(issue.code == 'non_increasing_start' for issue in validation.issues)
+
+
+def test_build_execution_pairs_marks_inserted_and_deleted_sections() -> None:
+    payload = ChapterValidationRequest(
+        source_chapters=[
+            ChapterValidationRequestItem(id='s-1', title='Chapter 1 Intro', start_page=0),
+            ChapterValidationRequestItem(id='s-2', title='Legacy Section', start_page=2),
+        ],
+        modified_chapters=[
+            ChapterValidationRequestItem(id='m-1', title='Chapter 1 Intro', start_page=0),
+            ChapterValidationRequestItem(id='m-2', title='New Section', start_page=2),
+        ],
+    )
+
+    validation = validate_chapter_match(payload, source_total_pages=4, modified_total_pages=4)
+    pairs = build_execution_pairs(validation)
+
+    assert validation.can_continue is True
+    assert [pair.status for pair in pairs] == ['equal', 'deleted', 'inserted']
+    assert pairs[1].modified_start_page is None
+    assert pairs[2].source_start_page is None
 
 
 def test_aggregate_chapter_results_prefixes_anchor_ids_and_keeps_zero_anchor_chapters() -> None:

@@ -91,10 +91,8 @@ function collectLocalIssues(side: AnalysisSide, totalPages: number, chapters: Ed
     const samePageForwardY =
       previousStart !== null &&
       chapter.start_page === previousStart &&
-      previousY !== null &&
-      chapter.start_y !== null &&
-      chapter.start_y > previousY;
-    if (previousStart !== null && chapter.start_page <= previousStart && !samePageForwardY) {
+      (previousY === null || chapter.start_y === null || chapter.start_y > previousY);
+    if (previousStart !== null && (chapter.start_page < previousStart || (chapter.start_page === previousStart && !samePageForwardY))) {
       issues.push({ side, chapter_id: chapter.id, message: 'Start pages must be strictly increasing.' });
     }
     if (index === 0 && chapter.start_page !== 0) {
@@ -188,6 +186,9 @@ export function ChapterConfirmPage({ analysisId, result, onConfirmed, onCancel }
   }, [analysisId, localIssues.length, payload]);
 
   const canContinue = localIssues.length === 0 && validation?.can_continue === true && !submitting;
+  const validationIssues = validation?.issues ?? [];
+  const validationErrors = validationIssues.filter((issue) => issue.severity === 'error');
+  const validationWarnings = validationIssues.filter((issue) => issue.severity === 'warning');
 
   const handleChapterChange = (side: AnalysisSide, chapterId: string, updates: Partial<EditableChapter>) => {
     const apply = (items: EditableChapter[]) =>
@@ -249,86 +250,70 @@ export function ChapterConfirmPage({ analysisId, result, onConfirmed, onCancel }
   };
 
   return (
-    <main className="px-5 py-5">
-      <div className="mx-auto flex max-w-7xl flex-col gap-5">
-        <section className="sticky top-4 z-10 rounded-[28px] border border-slate-200/70 bg-white/90 p-5 shadow-xl shadow-slate-200/40 backdrop-blur">
-          <div className="flex flex-wrap items-start justify-between gap-4">
+    <main className="px-4 py-4">
+      <div className="mx-auto flex max-w-[1600px] flex-col gap-3">
+        <section className="sticky top-3 z-10 rounded-xl border border-slate-200/70 bg-white/95 px-4 py-3 shadow-lg shadow-slate-200/40 backdrop-blur">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">Chapter Confirmation</p>
-              <h1 className="mt-2 text-3xl font-semibold text-slate-950">Review bookmark chapters</h1>
-              <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
-                {result.document_kind === 'pdf'
-                  ? 'Review the detected bookmark outline, fix titles or starting pages if needed, and continue when both sides match. PDF preview stays off the main page and opens only when you need it.'
-                  : 'Review the detected Heading 1 outline, adjust titles or starting block indexes if needed, and continue when both sides match.'}
-              </p>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500">Chapter Confirmation</p>
+              <h1 className="mt-1 text-xl font-semibold text-slate-950">Review bookmark chapters</h1>
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="mr-1 flex flex-wrap gap-1.5 text-xs">
+                <span className="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-700">Source {sourceChapters.length}</span>
+                <span className="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-700">Modified {modifiedChapters.length}</span>
+                {localIssues.length + validationErrors.length > 0 ? (
+                  <span className="rounded-full bg-rose-100 px-2.5 py-1 font-semibold text-rose-700">Errors {localIssues.length + validationErrors.length}</span>
+                ) : null}
+                {validationWarnings.length > 0 ? (
+                  <span className="rounded-full bg-amber-100 px-2.5 py-1 font-semibold text-amber-700">Warnings {validationWarnings.length}</span>
+                ) : null}
+              </div>
               {result.document_kind === 'pdf' ? (
                 <>
                   <button
-                    className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
+                    className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
                     onClick={() => setPreviewState({ side: 'source', focusPage: 0 })}
                     type="button"
                   >
-                    View source PDF
+                    Source PDF
                   </button>
                   <button
-                    className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
+                    className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
                     onClick={() => setPreviewState({ side: 'modified', focusPage: 0 })}
                     type="button"
                   >
-                    View modified PDF
+                    Modified PDF
                   </button>
                 </>
               ) : null}
               <button
-                className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
+                className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
                 onClick={onCancel}
                 type="button"
               >
                 Cancel
               </button>
               <button
-                className="rounded-full bg-slate-950 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-slate-300 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
+                className="rounded-lg bg-slate-950 px-3 py-1.5 text-xs font-semibold text-white shadow-md shadow-slate-300 transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400"
                 disabled={!canContinue}
                 onClick={() => void handleConfirm()}
                 type="button"
               >
-                {submitting ? 'Starting chapter diff…' : 'Continue'}
+                {submitting ? 'Starting…' : 'Continue'}
               </button>
             </div>
           </div>
-
-          {localIssues.length > 0 || validation?.issues.length || validationError ? (
-            <div className="mt-4 grid gap-3 lg:grid-cols-2">
-              {localIssues.map((issue) => (
-                <div
-                  key={`${issue.side}-${issue.chapter_id}-${issue.message}`}
-                  className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"
-                >
-                  <p className="font-semibold uppercase tracking-[0.14em]">
-                    {issue.side === 'source' ? 'Source' : 'Modified'} local check
-                  </p>
-                  <p className="mt-1">{issue.message}</p>
-                </div>
-              ))}
-              {validation?.issues.map((issue) => (
-                <ValidationIssueCard key={`${issue.side}-${issue.chapter_id}-${issue.code}`} issue={issue} />
-              ))}
-              {validationError ? (
-                <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-                  {validationError}
-                </div>
-              ) : null}
-            </div>
-          ) : (
-            <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-              Chapter coverage and matching are valid. Continuing will start the chapter-aware diff job.
-            </div>
-          )}
         </section>
 
-        <div className="grid gap-5 xl:grid-cols-2">
+        <ValidationSummary
+          localIssues={localIssues}
+          validationError={validationError}
+          validationErrors={validationErrors}
+          validationWarnings={validationWarnings}
+        />
+
+        <div className="grid gap-3 xl:grid-cols-2">
           <ChapterEditorPanel
             chapters={sourceChapters}
             documentKind={result.document_kind}
@@ -367,19 +352,89 @@ export function ChapterConfirmPage({ analysisId, result, onConfirmed, onCancel }
   );
 }
 
-function ValidationIssueCard({ issue }: { issue: ChapterValidationIssue }) {
+function ValidationSummary({
+  localIssues,
+  validationError,
+  validationErrors,
+  validationWarnings,
+}: {
+  localIssues: LocalIssue[];
+  validationError: string | null;
+  validationErrors: ChapterValidationIssue[];
+  validationWarnings: ChapterValidationIssue[];
+}) {
+  const issueCount = localIssues.length + validationErrors.length + validationWarnings.length + (validationError ? 1 : 0);
+  if (issueCount === 0) {
+    return (
+      <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700">
+        Chapter coverage and matching are valid.
+      </div>
+    );
+  }
+
   return (
-    <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
-      <p className="font-semibold uppercase tracking-[0.14em]">{issue.side === 'source' ? 'Source' : 'Modified'} match check</p>
-      <p className="mt-1">{issue.message}</p>
-      <p className="mt-2 text-xs text-rose-700">Raw: {visualizeWhitespace(issue.raw_title)}</p>
-      <p className="mt-1 text-xs text-rose-700">Normalized: {visualizeWhitespace(issue.normalized_title)}</p>
-      {issue.peer_raw_title || issue.peer_normalized_title ? (
-        <div className="mt-2 rounded-xl border border-rose-200/80 bg-white/60 px-3 py-2 text-xs text-rose-700">
-          <p>Closest peer raw: {visualizeWhitespace(issue.peer_raw_title)}</p>
-          <p className="mt-1">Closest peer normalized: {visualizeWhitespace(issue.peer_normalized_title)}</p>
-          {issue.suggested_peer_score !== null ? <p className="mt-1">Similarity: {issue.suggested_peer_score}</p> : null}
+    <details className="rounded-lg border border-slate-200 bg-white/90 shadow-sm shadow-slate-200/40" open={localIssues.length + validationErrors.length > 0}>
+      <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs text-slate-700 [&::-webkit-details-marker]:hidden">
+        <span className="font-semibold text-slate-900">Validation messages</span>
+        <span className="flex flex-wrap gap-1.5">
+          {localIssues.length + validationErrors.length > 0 ? (
+            <span className="rounded-full bg-rose-100 px-2 py-0.5 font-semibold text-rose-700">{localIssues.length + validationErrors.length} errors</span>
+          ) : null}
+          {validationWarnings.length > 0 ? (
+            <span className="rounded-full bg-amber-100 px-2 py-0.5 font-semibold text-amber-700">{validationWarnings.length} warnings</span>
+          ) : null}
+          {validationError ? <span className="rounded-full bg-rose-100 px-2 py-0.5 font-semibold text-rose-700">request failed</span> : null}
+          <span className="text-slate-500">Click to expand</span>
+        </span>
+      </summary>
+      <div className="max-h-56 overflow-y-auto border-t border-slate-100 p-2">
+        <div className="grid gap-1.5 lg:grid-cols-2">
+          {localIssues.map((issue) => (
+            <CompactLocalIssue key={`${issue.side}-${issue.chapter_id}-${issue.message}`} issue={issue} />
+          ))}
+          {validationErrors.map((issue) => (
+            <ValidationIssueCard key={`${issue.side}-${issue.chapter_id}-${issue.code}`} issue={issue} />
+          ))}
+          {validationWarnings.map((issue) => (
+            <ValidationIssueCard key={`${issue.side}-${issue.chapter_id}-${issue.code}`} issue={issue} />
+          ))}
+          {validationError ? <div className="rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-xs text-rose-700">{validationError}</div> : null}
         </div>
+      </div>
+    </details>
+  );
+}
+
+function CompactLocalIssue({ issue }: { issue: LocalIssue }) {
+  return (
+    <div className="rounded-md border border-rose-200 bg-rose-50 px-2 py-1.5 text-xs text-rose-800">
+      <span className="font-semibold">{issue.side === 'source' ? 'Source' : 'Modified'}</span>
+      <span className="mx-1 text-rose-400">·</span>
+      <span>{issue.message}</span>
+    </div>
+  );
+}
+
+function ValidationIssueCard({ issue }: { issue: ChapterValidationIssue }) {
+  const isWarning = issue.severity === 'warning';
+  return (
+    <div className={`rounded-md border px-2 py-1.5 text-xs ${isWarning ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-rose-200 bg-rose-50 text-rose-800'}`}>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="font-semibold">{issue.side === 'source' ? 'Source' : 'Modified'}</span>
+        <span className={isWarning ? 'text-amber-500' : 'text-rose-400'}>·</span>
+        <span className="font-medium">{issue.message}</span>
+      </div>
+      <p className="mt-1 truncate opacity-80">Raw: {visualizeWhitespace(issue.raw_title)}</p>
+      <p className="truncate opacity-80">Normalized: {visualizeWhitespace(issue.normalized_title)}</p>
+      {issue.peer_raw_title || issue.peer_normalized_title ? (
+        <details className="mt-1">
+          <summary className="cursor-pointer text-[11px] font-semibold opacity-80">Peer detail</summary>
+          <div className="mt-1 space-y-0.5 rounded bg-white/60 px-2 py-1 text-[11px]">
+            <p className="truncate">Raw: {visualizeWhitespace(issue.peer_raw_title)}</p>
+            <p className="truncate">Normalized: {visualizeWhitespace(issue.peer_normalized_title)}</p>
+            {issue.suggested_peer_score !== null ? <p>Similarity: {issue.suggested_peer_score}</p> : null}
+          </div>
+        </details>
       ) : null}
     </div>
   );
@@ -407,77 +462,75 @@ function ChapterEditorPanel({
   onPreviewPage: (page: number) => void;
 }) {
   return (
-    <section className="rounded-[28px] border border-slate-200/70 bg-white/85 p-4 shadow-lg shadow-slate-200/40 backdrop-blur">
-      <div className="mb-4 flex items-center justify-between gap-3">
+    <section className="overflow-hidden rounded-xl border border-slate-200/70 bg-white/90 shadow-md shadow-slate-200/40 backdrop-blur">
+      <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-3 py-2">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500">
             {side === 'source' ? 'Left' : 'Right'} outline
           </p>
-          <h2 className="mt-1 text-lg font-semibold text-slate-900">{label}</h2>
+          <h2 className="text-sm font-semibold text-slate-900">{label} <span className="font-normal text-slate-500">({chapters.length})</span></h2>
         </div>
         <button
-          className="rounded-full border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
+          className="rounded-md border border-slate-300 px-2.5 py-1.5 text-xs font-medium text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
           onClick={onAddChapter}
           type="button"
         >
           Add chapter
         </button>
       </div>
-      <div className="space-y-3">
+      <div className="max-h-[calc(100vh-210px)] overflow-y-auto divide-y divide-slate-100">
         {chapters.map((chapter, index) => (
-          <div key={chapter.id} className="rounded-2xl border border-slate-200 bg-white p-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Chapter {index + 1}</p>
-                <p className="mt-1 text-xs text-slate-500">{chapter.source} · {chapter.confidence}</p>
-              </div>
-              <div className="flex flex-wrap gap-2">
+          <div key={chapter.id} className="grid gap-2 px-3 py-2 md:grid-cols-[64px_minmax(0,1fr)_96px_112px] md:items-center">
+            <div className="flex items-center gap-2 md:block">
+              <span className="inline-flex min-w-10 justify-center rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-semibold text-slate-600">#{index + 1}</span>
+              <span className="text-[11px] text-slate-500 md:mt-1 md:block">L{chapter.level}</span>
+            </div>
+            <label className="block min-w-0" style={{ paddingLeft: `${Math.max(chapter.level - 1, 0) * 14}px` }}>
+              <span className="sr-only">Title</span>
+              <input
+                className="w-full rounded-md border border-slate-200 px-2 py-1.5 text-sm text-slate-900 outline-none transition focus:border-slate-400"
+                onChange={(event) => onUpdateChapter(chapter.id, { title: event.target.value })}
+                value={chapter.title}
+              />
+              <span className="mt-0.5 block truncate text-[11px] text-slate-400">{chapter.source} · {chapter.confidence}</span>
+            </label>
+            <label className="block">
+              <span className="sr-only">{documentKind === 'pdf' ? 'Start page' : 'Start block'}</span>
+              <input
+                className="w-full rounded-md border border-slate-200 px-2 py-1.5 text-sm text-slate-900 outline-none transition focus:border-slate-400"
+                max={totalPages}
+                min={1}
+                onChange={(event) => {
+                  const rawValue = event.target.value;
+                  if (rawValue === '') {
+                    onUpdateChapter(chapter.id, { start_page: Number.NaN });
+                    return;
+                  }
+                  onUpdateChapter(chapter.id, { start_page: Number(rawValue) - 1 });
+                }}
+                type="number"
+                value={Number.isFinite(chapter.start_page) ? chapter.start_page + 1 : ''}
+              />
+              <span className="mt-0.5 block text-[11px] text-slate-400">{documentKind === 'pdf' ? 'page' : 'block'}</span>
+            </label>
+            <div className="flex flex-wrap gap-1.5 md:justify-end">
                 {documentKind === 'pdf' ? (
                   <button
-                    className="rounded-full border border-slate-300 px-3 py-1 text-xs font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
+                    className="rounded-md border border-slate-300 px-2 py-1 text-xs font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50"
                     onClick={() => onPreviewPage(Math.max(chapter.start_page, 0))}
                     type="button"
                   >
-                    Preview page
+                    Preview
                   </button>
                 ) : null}
                 <button
-                  className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="rounded-md border border-rose-200 px-2 py-1 text-xs font-semibold text-rose-700 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50"
                   disabled={chapters.length === 1}
                   onClick={() => onDeleteChapter(chapter.id)}
                   type="button"
                 >
                   Delete
                 </button>
-              </div>
-            </div>
-            <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,1fr)_140px]">
-              <label className="block">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">Title</p>
-                <input
-                  className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400"
-                  onChange={(event) => onUpdateChapter(chapter.id, { title: event.target.value })}
-                  value={chapter.title}
-                />
-              </label>
-              <label className="block">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">{documentKind === 'pdf' ? 'Start page' : 'Start block'}</p>
-                <input
-                  className="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400"
-                  max={totalPages}
-                  min={1}
-                  onChange={(event) => {
-                    const rawValue = event.target.value;
-                    if (rawValue === '') {
-                      onUpdateChapter(chapter.id, { start_page: Number.NaN });
-                      return;
-                    }
-                    onUpdateChapter(chapter.id, { start_page: Number(rawValue) - 1 });
-                  }}
-                  type="number"
-                  value={Number.isFinite(chapter.start_page) ? chapter.start_page + 1 : ''}
-                />
-              </label>
             </div>
           </div>
         ))}

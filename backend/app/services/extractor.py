@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 import unicodedata
 from typing import Any
 
@@ -12,6 +13,14 @@ from app.services.normalizer import normalize_char
 
 
 LINE_TOLERANCE = 3.0
+RUNNING_REGION_RATIO = 0.18
+RUNNING_LINE_MIN_PAGE_RATIO = 0.5
+RUNNING_LINE_MIN_PAGES = 2
+RUNNING_LINE_TOKEN_RE = re.compile(
+    r"\b(?:confidential|protocol|file\s*name|page|version|beone|bgb|docx?)\b",
+    re.IGNORECASE,
+)
+RUNNING_LINE_NUMBER_RE = re.compile(r"\d+")
 
 
 @dataclass(slots=True)
@@ -446,6 +455,65 @@ def _bbox_center_y(bbox: tuple[float, float, float, float]) -> float:
     return (bbox[1] + bbox[3]) / 2
 
 
+def _running_line_fingerprint(text: str) -> str:
+    compact = " ".join(text.split()).lower()
+    compact = RUNNING_LINE_NUMBER_RE.sub("#", compact)
+    return compact.strip()
+
+
+def _line_text(line: _RawLine) -> str:
+    return "".join(char for char, _ in line.chars)
+
+
+def _is_running_line_candidate(line: _RawLine, page_height: float) -> bool:
+    if page_height <= 0 or not line.chars:
+        return False
+    center_y = _bbox_center_y(line.bbox)
+    in_running_region = center_y <= page_height * RUNNING_REGION_RATIO or center_y >= page_height * (1 - RUNNING_REGION_RATIO)
+    if not in_running_region:
+        return False
+    text = _line_text(line)
+    if not text.strip():
+        return False
+    return bool(RUNNING_LINE_TOKEN_RE.search(text))
+
+
+def _filter_repeated_running_lines(
+    lines: list[_RawLine],
+    *,
+    page_heights: dict[int, float],
+) -> list[_RawLine]:
+    total_pages = len(page_heights)
+    if total_pages < RUNNING_LINE_MIN_PAGES:
+        return lines
+
+    pages_by_fingerprint: dict[str, set[int]] = {}
+    for line in lines:
+        page_height = page_heights.get(line.page, 0.0)
+        if not _is_running_line_candidate(line, page_height):
+            continue
+        fingerprint = _running_line_fingerprint(_line_text(line))
+        if not fingerprint:
+            continue
+        pages_by_fingerprint.setdefault(fingerprint, set()).add(line.page)
+
+    minimum_pages = max(RUNNING_LINE_MIN_PAGES, int(total_pages * RUNNING_LINE_MIN_PAGE_RATIO))
+    repeated_fingerprints = {
+        fingerprint
+        for fingerprint, pages in pages_by_fingerprint.items()
+        if len(pages) >= minimum_pages
+    }
+    if not repeated_fingerprints:
+        return lines
+
+    return [
+        line
+        for line in lines
+        if _running_line_fingerprint(_line_text(line)) not in repeated_fingerprints
+        or not _is_running_line_candidate(line, page_heights.get(line.page, 0.0))
+    ]
+
+
 def _position_in_window(
     *,
     page: int,
@@ -740,6 +808,7 @@ def extract_document(
     pages: list[PageInfo] = []
     extracted_lines: list[_RawLine] = []
     tables: list[TableRegion] = []
+    page_heights: dict[int, float] = {}
 
     with fitz.open(path) as doc:
         if page_range is None:
@@ -752,6 +821,7 @@ def extract_document(
             page = doc.load_page(page_number)
             rect = page.rect
             pages.append(PageInfo(page=page_number, width=rect.width, height=rect.height))
+            page_heights[page_number] = float(rect.height)
             page_tables = _extract_tables_from_page(
                 page,
                 page_number=page_number,
@@ -768,6 +838,8 @@ def extract_document(
                     tables=page_tables,
                 )
             )
+
+    extracted_lines = _filter_repeated_running_lines(extracted_lines, page_heights=page_heights)
 
     chars: list[CharAtom] = []
     words: list[WordAtom] = []

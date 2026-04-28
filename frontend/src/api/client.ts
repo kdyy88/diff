@@ -45,6 +45,8 @@ const CHAPTER_ANALYSIS_STATES = ['uploaded', 'analyzing', 'fallback', 'done', 'f
 const DIFF_KINDS = ['insert', 'delete', 'replace', 'reflow'] as const;
 const CHAPTER_SOURCES = ['bookmark', 'heading', 'manual', 'synthetic'] as const;
 const CHAPTER_CONFIDENCE_LEVELS = ['high', 'medium', 'low'] as const;
+const CHAPTER_VALIDATION_SEVERITIES = ['error', 'warning'] as const;
+const SECTION_STATUSES = ['equal', 'inserted', 'deleted', 'container'] as const;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -254,6 +256,7 @@ function parseChapterDiffSummary(value: unknown, context: string) {
     id: expectString(record.id, `${context}.id`),
     title: expectString(record.title, `${context}.title`),
     index: expectNumber(record.index, `${context}.index`),
+    status: expectOneOf(record.status ?? 'equal', SECTION_STATUSES, `${context}.status`),
     level: optionalNumber(record.level, 1),
     parent_id: optionalNullableString(record.parent_id),
     path: optionalStringArray(record.path),
@@ -349,6 +352,7 @@ function parseChapterValidationIssue(value: unknown, context: string) {
       ['invalid_page', 'non_increasing_start', 'coverage_gap', 'duplicate_normalized_title', 'unmatched_chapter'] as const,
       `${context}.code`,
     ),
+    severity: expectOneOf(record.severity ?? 'error', CHAPTER_VALIDATION_SEVERITIES, `${context}.severity`),
     side: expectOneOf(record.side, ['source', 'modified'] as const, `${context}.side`),
     chapter_id: expectString(record.chapter_id, `${context}.chapter_id`),
     message: expectString(record.message, `${context}.message`),

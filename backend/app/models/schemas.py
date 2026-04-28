@@ -15,6 +15,8 @@ ChapterAnalysisState = Literal["uploaded", "analyzing", "fallback", "done", "fai
 ChapterSource = Literal["bookmark", "heading", "manual", "synthetic"]
 ChapterConfidenceLevel = Literal["high", "medium", "low"]
 AnalysisSide = Literal["source", "modified"]
+ChapterValidationSeverity = Literal["error", "warning"]
+SectionStatus = Literal["equal", "inserted", "deleted", "container"]
 ChapterValidationIssueCode = Literal[
     "invalid_page",
     "non_increasing_start",
@@ -108,6 +110,7 @@ class DocumentChapterPlan(BaseModel):
 
 class ChapterValidationIssue(BaseModel):
     code: ChapterValidationIssueCode
+    severity: ChapterValidationSeverity = "error"
     side: AnalysisSide
     chapter_id: str
     message: str
@@ -151,6 +154,7 @@ class ChapterDiffSummary(BaseModel):
     id: str
     title: str
     index: int
+    status: SectionStatus = "equal"
     level: int = 1
     parent_id: str | None = None
     path: list[str] = Field(default_factory=list)

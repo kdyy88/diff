@@ -5,6 +5,7 @@ from docx import Document as DocxDocument
 import fitz
 
 from app.services.differ import compare_documents
+import app.services.differ as differ_module
 from app.services.extractor import CharAtom, DocumentProjection, PageInfo, TextSegment, WordAtom, extract_document
 
 
@@ -532,6 +533,23 @@ def test_compare_documents_marks_large_replace_windows_low_confidence() -> None:
 
     assert text_anchors
     assert all(anchor.confidence == "low" for anchor in text_anchors)
+
+
+def test_compare_documents_splits_large_replace_windows_before_fine_diff(monkeypatch) -> None:
+    observed_window_sizes: list[tuple[int, int]] = []
+
+    def fake_compare_text_window(*args, window_a, window_b, **kwargs):  # type: ignore[no-untyped-def]
+        observed_window_sizes.append((window_a.segment_count, window_b.segment_count))
+        return []
+
+    monkeypatch.setattr(differ_module, "_compare_text_window", fake_compare_text_window)
+    left = _build_wrapped_document(["Prefix", "L1", "L2", "L3", "L4", "L5", "L6", "Suffix"])
+    right = _build_wrapped_document(["Prefix", "R1", "R2", "R3", "R4", "R5", "R6", "Suffix"])
+
+    compare_documents(left, right, include_reflow=False)
+
+    assert observed_window_sizes
+    assert max(max(left_count, right_count) for left_count, right_count in observed_window_sizes) <= differ_module.MAX_DMP_SEGMENTS
 
 
 def test_compare_documents_merges_large_insert_region_into_page_bbox() -> None:

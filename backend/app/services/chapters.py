@@ -27,6 +27,7 @@ from app.models.schemas import (
     DiffResult,
     DiffSummary,
     DocumentChapterPlan,
+    SectionStatus,
 )
 from app.services.docx_outline import is_heading_one_block, load_docx_blocks
 from app.services.document_kind import UploadedDocument
@@ -34,7 +35,7 @@ from app.services.extractor import PageInfo
 
 
 CHAPTER_NUMBERING_RE = re.compile(
-    r"^(?:chapter\s+\d+[\w.-]*|第[一二三四五六七八九十百千万0-9]+章|\d+(?:\.\d+)*)(?:[\s:：\-.、]+)",
+    r"^(?:chapter\s+\d+[\w.-]*|第[一二三四五六七八九十百千万0-9]+章|[ivxlcdm]+|[a-z]|\d+(?:\.\d+)*)(?:[\s:：\-.、]+)",
     re.IGNORECASE,
 )
 
@@ -46,6 +47,7 @@ class _ChapterCandidate:
     start_y: float | None
     level: int
     path: list[str]
+    raw_order: int
     source: str
     confidence: str
 
@@ -58,14 +60,16 @@ class ChapterExecutionPair:
     chapter_level: int
     chapter_path: list[str]
     parent_id: str | None
-    source_start_page: int
-    source_end_page: int
-    modified_start_page: int
-    modified_end_page: int
+    source_start_page: int | None
+    source_end_page: int | None
+    modified_start_page: int | None
+    modified_end_page: int | None
     source_start_y: float | None = None
     source_end_y: float | None = None
     modified_start_y: float | None = None
     modified_end_y: float | None = None
+    status: SectionStatus = "equal"
+    confidence_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -125,8 +129,8 @@ def _build_plan_from_candidates(
     candidates: list[_ChapterCandidate],
 ) -> DocumentChapterPlan:
     chapters: list[ChapterDraft] = []
-    ordered = sorted(candidates, key=lambda item: (item.start_page, item.start_y or 0.0, item.level, item.text.lower()))
-    latest_level_one_id: str | None = None
+    ordered = sorted(candidates, key=lambda item: (item.start_page, item.start_y or 0.0, item.raw_order))
+    latest_id_by_level: dict[int, str] = {}
     for index, candidate in enumerate(ordered):
         next_candidate = ordered[index + 1] if index + 1 < len(ordered) else None
         if next_candidate is None:
@@ -140,7 +144,12 @@ def _build_plan_from_candidates(
             end_y = None
         title = candidate.text.strip() or f"Chapter {index + 1}"
         chapter_id = _make_chapter_id(side, index)
-        parent_id = latest_level_one_id if candidate.level > 1 else None
+        parent_id = None
+        if candidate.level > 1:
+            for parent_level in range(candidate.level - 1, 0, -1):
+                parent_id = latest_id_by_level.get(parent_level)
+                if parent_id is not None:
+                    break
         chapters.append(
             ChapterDraft(
                 id=chapter_id,
@@ -158,15 +167,16 @@ def _build_plan_from_candidates(
                 confidence=candidate.confidence,
             )
         )
-        if candidate.level == 1:
-            latest_level_one_id = chapter_id
+        latest_id_by_level[candidate.level] = chapter_id
+        for stale_level in [level for level in latest_id_by_level if level > candidate.level]:
+            latest_id_by_level.pop(stale_level, None)
     return DocumentChapterPlan(side=side, total_pages=total_pages, chapters=chapters)
 
 
 def _normalize_bookmark_entries(raw_toc: list[list[object]], total_pages: int) -> list[_ChapterCandidate]:
     candidates: list[_ChapterCandidate] = []
     current_path: list[str] = []
-    for entry in raw_toc:
+    for raw_order, entry in enumerate(raw_toc):
         if len(entry) < 3:
             continue
         level = entry[0]
@@ -175,13 +185,16 @@ def _normalize_bookmark_entries(raw_toc: list[list[object]], total_pages: int) -
         dest = entry[3] if len(entry) > 3 else None
         if not isinstance(level, int) or level < 1 or not title:
             continue
-        if level > 2:
+        if not normalize_chapter_title(title):
             continue
 
         start_page: int | None = None
         start_y: float | None = None
-        if isinstance(dest, dict) and isinstance(dest.get("page"), int):
-            start_page = int(dest["page"])
+        if isinstance(dest, dict) and isinstance(dest.get("page"), (int, str)):
+            try:
+                start_page = int(dest["page"])
+            except (TypeError, ValueError):
+                start_page = None
             point = dest.get("to")
             if point is not None and hasattr(point, "y"):
                 start_y = float(point.y)
@@ -193,11 +206,12 @@ def _normalize_bookmark_entries(raw_toc: list[list[object]], total_pages: int) -
         if start_page is None or start_page < 0 or start_page >= total_pages:
             continue
 
-        if level == 1:
-            current_path = [title]
-        else:
-            parent_title = current_path[0] if current_path else None
-            current_path = ([parent_title] if parent_title else []) + [title]
+        if level <= len(current_path):
+            current_path = current_path[: level - 1]
+        while len(current_path) < level - 1:
+            current_path.append("")
+        current_path.append(title)
+        path = [part for part in current_path if part]
 
         candidates.append(
             _ChapterCandidate(
@@ -205,7 +219,8 @@ def _normalize_bookmark_entries(raw_toc: list[list[object]], total_pages: int) -
                 start_page=start_page,
                 start_y=start_y,
                 level=level,
-                path=current_path.copy(),
+                path=path,
+                raw_order=raw_order,
                 source="bookmark",
                 confidence="high",
             )
@@ -213,13 +228,7 @@ def _normalize_bookmark_entries(raw_toc: list[list[object]], total_pages: int) -
 
     deduped: list[_ChapterCandidate] = []
     seen_positions: set[tuple[int, int, str]] = set()
-    seen_ambiguous_positions: set[tuple[int, int]] = set()
-    for candidate in sorted(candidates, key=lambda item: (item.start_page, item.start_y or 0.0, item.level, item.text.lower())):
-        ambiguous_key = (candidate.start_page, candidate.level)
-        if candidate.start_y is None and ambiguous_key in seen_ambiguous_positions:
-            continue
-        if candidate.start_y is None:
-            seen_ambiguous_positions.add(ambiguous_key)
+    for candidate in sorted(candidates, key=lambda item: (item.start_page, item.start_y or 0.0, item.raw_order)):
         dedupe_key = (
             candidate.start_page,
             round(candidate.start_y or 0.0),
@@ -239,6 +248,7 @@ def _normalize_bookmark_entries(raw_toc: list[list[object]], total_pages: int) -
                 start_y=None,
                 level=1,
                 path=["Front Matter"],
+                raw_order=-1,
                 source="synthetic",
                 confidence="medium",
             ),
@@ -269,6 +279,7 @@ def analyze_docx_heading_plan(docx_path: str | Path, side: str) -> DocumentChapt
             start_y=None,
             level=1,
             path=[block.text],
+            raw_order=block.index,
             source="heading",
             confidence="high",
         )
@@ -288,6 +299,7 @@ def analyze_docx_heading_plan(docx_path: str | Path, side: str) -> DocumentChapt
                 start_y=None,
                 level=1,
                 path=["Front Matter"],
+                raw_order=-1,
                 source="synthetic",
                 confidence="medium",
             ),
@@ -358,14 +370,16 @@ def _hydrate_confirmed_plan(
                     normalized_title=normalized_title,
                 )
             )
-        same_page_with_forward_y = (
+        same_page_with_valid_position = (
             previous_start is not None
             and start_page == previous_start
-            and previous_y is not None
-            and start_y is not None
-            and start_y > previous_y
+            and (
+                previous_y is None
+                or start_y is None
+                or start_y > previous_y
+            )
         )
-        if previous_start is not None and start_page <= previous_start and not same_page_with_forward_y:
+        if previous_start is not None and (start_page < previous_start or (start_page == previous_start and not same_page_with_valid_position)):
             issues.append(
                 ChapterValidationIssue(
                     code="non_increasing_start",
@@ -451,13 +465,20 @@ def _add_duplicate_title_issues(plan: DocumentChapterPlan, issues: list[ChapterV
     for normalized_title, chapters in titles.items():
         if not normalized_title or len(chapters) < 2:
             continue
+        positions = {(chapter.start_page, chapter.start_y) for chapter in chapters}
+        severity = "error" if len(positions) < len(chapters) else "warning"
         for chapter in chapters:
             issues.append(
                 ChapterValidationIssue(
                     code="duplicate_normalized_title",
+                    severity=severity,
                     side=plan.side,
                     chapter_id=chapter.id,
-                    message="Normalized chapter titles must be unique on each side.",
+                    message=(
+                        "Duplicate chapter titles share the same location and must be disambiguated."
+                        if severity == "error"
+                        else "Duplicate chapter titles were disambiguated by outline order and page position."
+                    ),
                     raw_title=chapter.title,
                     normalized_title=normalized_title,
                 )
@@ -466,6 +487,21 @@ def _add_duplicate_title_issues(plan: DocumentChapterPlan, issues: list[ChapterV
 
 def _match_key(chapter: ChapterDraft) -> str:
     return "/".join(chapter.normalized_path) if chapter.normalized_path else chapter.normalized_title
+
+
+def _chapter_has_children(chapter: ChapterDraft, chapters: list[ChapterDraft]) -> bool:
+    return any(candidate.parent_id == chapter.id for candidate in chapters)
+
+
+def _group_chapters_by_match_key(chapters: list[ChapterDraft]) -> dict[str, list[ChapterDraft]]:
+    grouped: dict[str, list[ChapterDraft]] = {}
+    for chapter in sorted(chapters, key=lambda item: (item.start_page, item.start_y or 0.0, item.level, item.id)):
+        grouped.setdefault(_match_key(chapter), []).append(chapter)
+    return grouped
+
+
+def _blocking_issues(issues: list[ChapterValidationIssue]) -> list[ChapterValidationIssue]:
+    return [issue for issue in issues if issue.severity == "error"]
 
 
 def _closest_peer(chapter: ChapterDraft, peers: list[ChapterDraft]) -> tuple[ChapterDraft | None, float | None]:
@@ -507,20 +543,29 @@ def validate_chapter_match(
     _add_duplicate_title_issues(source_plan, issues)
     _add_duplicate_title_issues(modified_plan, issues)
 
-    if not issues:
-        source_titles = {_match_key(chapter): chapter for chapter in source_plan.chapters}
-        modified_titles = {_match_key(chapter): chapter for chapter in modified_plan.chapters}
+    if not _blocking_issues(issues):
+        source_groups = _group_chapters_by_match_key(source_plan.chapters)
+        modified_groups = _group_chapters_by_match_key(modified_plan.chapters)
+        matched_source_ids: set[str] = set()
+        matched_modified_ids: set[str] = set()
+
+        for key, source_group in source_groups.items():
+            modified_group = modified_groups.get(key, [])
+            for source_chapter, modified_chapter in zip(source_group, modified_group):
+                matched_source_ids.add(source_chapter.id)
+                matched_modified_ids.add(modified_chapter.id)
 
         for chapter in source_plan.chapters:
-            if _match_key(chapter) in modified_titles:
+            if chapter.id in matched_source_ids:
                 continue
             peer, score = _closest_peer(chapter, modified_plan.chapters)
             issues.append(
                 ChapterValidationIssue(
                     code="unmatched_chapter",
+                    severity="warning",
                     side="source",
                     chapter_id=chapter.id,
-                    message="No exact chapter title match was found on the modified side.",
+                    message="This section exists only on the source side and will be treated as deleted.",
                     raw_title=chapter.title,
                     normalized_title=chapter.normalized_title,
                     peer_chapter_id=peer.id if peer else None,
@@ -530,15 +575,16 @@ def validate_chapter_match(
                 )
             )
         for chapter in modified_plan.chapters:
-            if _match_key(chapter) in source_titles:
+            if chapter.id in matched_modified_ids:
                 continue
             peer, score = _closest_peer(chapter, source_plan.chapters)
             issues.append(
                 ChapterValidationIssue(
                     code="unmatched_chapter",
+                    severity="warning",
                     side="modified",
                     chapter_id=chapter.id,
-                    message="No exact chapter title match was found on the source side.",
+                    message="This section exists only on the modified side and will be treated as inserted.",
                     raw_title=chapter.title,
                     normalized_title=chapter.normalized_title,
                     peer_chapter_id=peer.id if peer else None,
@@ -549,7 +595,7 @@ def validate_chapter_match(
             )
 
     return ChapterValidationResult(
-        can_continue=not issues,
+        can_continue=not _blocking_issues(issues),
         issues=issues,
         source_plan=source_plan,
         modified_plan=modified_plan,
@@ -557,26 +603,59 @@ def validate_chapter_match(
 
 
 def build_execution_pairs(validation: ChapterValidationResult) -> list[ChapterExecutionPair]:
-    modified_by_title = {_match_key(chapter): chapter for chapter in validation.modified_plan.chapters}
-    return [
-        ChapterExecutionPair(
-            chapter_id=chapter.id,
-            chapter_title=chapter.title,
-            chapter_index=index,
-            chapter_level=chapter.level,
-            chapter_path=chapter.path,
-            parent_id=chapter.parent_id,
-            source_start_page=chapter.start_page,
-            source_end_page=chapter.end_page,
-            modified_start_page=modified_by_title[_match_key(chapter)].start_page,
-            modified_end_page=modified_by_title[_match_key(chapter)].end_page,
-            source_start_y=chapter.start_y,
-            source_end_y=chapter.end_y,
-            modified_start_y=modified_by_title[_match_key(chapter)].start_y,
-            modified_end_y=modified_by_title[_match_key(chapter)].end_y,
+    modified_groups = _group_chapters_by_match_key(validation.modified_plan.chapters)
+    consumed_modified_ids: set[str] = set()
+    pairs: list[ChapterExecutionPair] = []
+
+    for chapter in validation.source_plan.chapters:
+        modified_candidates = [candidate for candidate in modified_groups.get(_match_key(chapter), []) if candidate.id not in consumed_modified_ids]
+        modified_chapter = modified_candidates[0] if modified_candidates else None
+        if modified_chapter is not None:
+            consumed_modified_ids.add(modified_chapter.id)
+
+        is_container = _chapter_has_children(chapter, validation.source_plan.chapters)
+        pairs.append(
+            ChapterExecutionPair(
+                chapter_id=chapter.id,
+                chapter_title=chapter.title,
+                chapter_index=len(pairs),
+                chapter_level=chapter.level,
+                chapter_path=chapter.path,
+                parent_id=chapter.parent_id,
+                source_start_page=chapter.start_page,
+                source_end_page=chapter.end_page,
+                modified_start_page=modified_chapter.start_page if modified_chapter else None,
+                modified_end_page=modified_chapter.end_page if modified_chapter else None,
+                source_start_y=chapter.start_y,
+                source_end_y=chapter.end_y,
+                modified_start_y=modified_chapter.start_y if modified_chapter else None,
+                modified_end_y=modified_chapter.end_y if modified_chapter else None,
+                status="container" if is_container else "equal" if modified_chapter else "deleted",
+            )
         )
-        for index, chapter in enumerate(validation.source_plan.chapters)
-    ]
+
+    for chapter in validation.modified_plan.chapters:
+        if chapter.id in consumed_modified_ids:
+            continue
+        pairs.append(
+            ChapterExecutionPair(
+                chapter_id=chapter.id,
+                chapter_title=chapter.title,
+                chapter_index=len(pairs),
+                chapter_level=chapter.level,
+                chapter_path=chapter.path,
+                parent_id=chapter.parent_id,
+                source_start_page=None,
+                source_end_page=None,
+                modified_start_page=chapter.start_page,
+                modified_end_page=chapter.end_page,
+                modified_start_y=chapter.start_y,
+                modified_end_y=chapter.end_y,
+                status="inserted",
+            )
+        )
+
+    return pairs
 
 
 def aggregate_chapter_results(
@@ -617,6 +696,7 @@ def aggregate_chapter_results(
                 "id": pair.chapter_id,
                 "title": pair.chapter_title,
                 "index": pair.chapter_index,
+                "status": pair.status,
                 "level": pair.chapter_level,
                 "parent_id": pair.parent_id,
                 "path": pair.chapter_path,

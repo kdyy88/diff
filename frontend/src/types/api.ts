@@ -4,6 +4,8 @@ export type DiffKind = 'insert' | 'delete' | 'replace' | 'reflow';
 export type ConfidenceLevel = 'high' | 'low';
 export type ChapterConfidenceLevel = 'high' | 'medium' | 'low';
 export type ChapterSource = 'bookmark' | 'heading' | 'manual' | 'synthetic';
+export type ChapterValidationSeverity = 'error' | 'warning';
+export type SectionStatus = 'equal' | 'inserted' | 'deleted' | 'container';
 export type JobState = 'uploaded' | 'extracting' | 'aligning' | 'projecting' | 'done' | 'failed';
 export type ChapterAnalysisState = 'uploaded' | 'analyzing' | 'fallback' | 'done' | 'failed';
 export type AnalysisSide = 'source' | 'modified';
@@ -82,6 +84,7 @@ export interface ChapterDiffSummary {
   id: string;
   title: string;
   index: number;
+  status: SectionStatus;
   level: number;
   parent_id: string | null;
   path: string[];
@@ -161,6 +164,7 @@ export interface ChapterValidationIssue {
     | 'coverage_gap'
     | 'duplicate_normalized_title'
     | 'unmatched_chapter';
+  severity: ChapterValidationSeverity;
   side: AnalysisSide;
   chapter_id: string;
   message: string;

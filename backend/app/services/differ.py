@@ -20,6 +20,7 @@ WEAK_DELIMITER_CHARS = {" ", ",", "，", "、", ":", "：", "/", "-", "(", ")", 
 STRONG_BOUNDARY_CHARS = {"\n", ".", "。", ";", "；", "!", "！", "?", "？"}
 EXCERPT_TARGET_MIN_CHARS = 80
 EXCERPT_TARGET_MAX_CHARS = 160
+MAX_DMP_SEGMENTS = 4
 LIST_PREFIX_RE = re.compile(r"^\(?[0-9一二三四五六七八九十]+\)?[、.．)]?$")
 WORD_DOM_ID_RE = re.compile(r"^(heading|paragraph|table)-(?P<block>\d+)(?:-r(?P<row>\d+)-c(?P<col>\d+))?$")
 
@@ -1023,6 +1024,90 @@ def _compare_text_window(
     ]
 
 
+def _compare_large_replace_window(
+    document_a: DocumentProjection,
+    document_b: DocumentProjection,
+    *,
+    left_segments: list[TextSegment],
+    right_segments: list[TextSegment],
+    i1: int,
+    i2: int,
+    j1: int,
+    j2: int,
+    anchor_index_start: int,
+) -> list[DiffAnchor]:
+    inner_matcher = DiffLibSequenceMatcher(
+        None,
+        [segment.aligned_text for segment in left_segments[i1:i2]],
+        [segment.aligned_text for segment in right_segments[j1:j2]],
+        autojunk=False,
+    )
+    anchors: list[DiffAnchor] = []
+    next_anchor_index = anchor_index_start
+
+    for tag, local_i1, local_i2, local_j1, local_j2 in inner_matcher.get_opcodes():
+        if tag == "equal":
+            continue
+
+        absolute_i1 = i1 + local_i1
+        absolute_i2 = i1 + local_i2
+        absolute_j1 = j1 + local_j1
+        absolute_j2 = j1 + local_j2
+        left_count = absolute_i2 - absolute_i1
+        right_count = absolute_j2 - absolute_j1
+
+        if tag == "replace" and max(left_count, right_count) > MAX_DMP_SEGMENTS:
+            shared = min(left_count, right_count)
+            for offset in range(shared):
+                segment_anchors = _compare_text_window(
+                    document_a,
+                    document_b,
+                    window_a=_build_text_window(document_a, left_segments, absolute_i1 + offset, absolute_i1 + offset + 1),
+                    window_b=_build_text_window(document_b, right_segments, absolute_j1 + offset, absolute_j1 + offset + 1),
+                    confidence="low",
+                    anchor_index_start=next_anchor_index,
+                )
+                anchors.extend(segment_anchors)
+                next_anchor_index += len(segment_anchors)
+
+            if left_count > shared:
+                segment_anchors = _compare_text_window(
+                    document_a,
+                    document_b,
+                    window_a=_build_text_window(document_a, left_segments, absolute_i1 + shared, absolute_i2),
+                    window_b=_build_text_window(document_b, right_segments, absolute_j2, absolute_j2),
+                    confidence="low",
+                    anchor_index_start=next_anchor_index,
+                )
+                anchors.extend(segment_anchors)
+                next_anchor_index += len(segment_anchors)
+            if right_count > shared:
+                segment_anchors = _compare_text_window(
+                    document_a,
+                    document_b,
+                    window_a=_build_text_window(document_a, left_segments, absolute_i2, absolute_i2),
+                    window_b=_build_text_window(document_b, right_segments, absolute_j1 + shared, absolute_j2),
+                    confidence="low",
+                    anchor_index_start=next_anchor_index,
+                )
+                anchors.extend(segment_anchors)
+                next_anchor_index += len(segment_anchors)
+            continue
+
+        segment_anchors = _compare_text_window(
+            document_a,
+            document_b,
+            window_a=_build_text_window(document_a, left_segments, absolute_i1, absolute_i2),
+            window_b=_build_text_window(document_b, right_segments, absolute_j1, absolute_j2),
+            confidence="low",
+            anchor_index_start=next_anchor_index,
+        )
+        anchors.extend(segment_anchors)
+        next_anchor_index += len(segment_anchors)
+
+    return anchors
+
+
 def _compare_tables(
     document_a: DocumentProjection,
     document_b: DocumentProjection,
@@ -1214,15 +1299,29 @@ def compare_documents(
                 summary.reflows += 1
             continue
 
-        confidence = "low" if tag == "replace" and max(window_a.segment_count, window_b.segment_count) >= 5 else "high"
-        window_anchors = _compare_text_window(
-            document_a,
-            document_b,
-            window_a=window_a,
-            window_b=window_b,
-            confidence=confidence,
-            anchor_index_start=next_anchor_index,
-        )
+        is_large_replace = tag == "replace" and max(window_a.segment_count, window_b.segment_count) > MAX_DMP_SEGMENTS
+        confidence = "low" if is_large_replace else "high"
+        if is_large_replace:
+            window_anchors = _compare_large_replace_window(
+                document_a,
+                document_b,
+                left_segments=left_segments,
+                right_segments=right_segments,
+                i1=i1,
+                i2=i2,
+                j1=j1,
+                j2=j2,
+                anchor_index_start=next_anchor_index,
+            )
+        else:
+            window_anchors = _compare_text_window(
+                document_a,
+                document_b,
+                window_a=window_a,
+                window_b=window_b,
+                confidence=confidence,
+                anchor_index_start=next_anchor_index,
+            )
         text_anchors.extend(window_anchors)
         next_anchor_index += len(window_anchors)
 

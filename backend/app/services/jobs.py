@@ -9,11 +9,11 @@ from time import monotonic
 from uuid import uuid4
 
 from app.core.config import TERMINAL_RECORD_TTL_SECONDS, ensure_default_temp_dir, ensure_markdown_output_dir
-from app.models.schemas import CreateJobResponse, DiffResult, JobStatus
+from app.models.schemas import CreateJobResponse, DiffResult, DiffSummary, JobStatus
 from app.services.chapters import ChapterExecutionPair, aggregate_chapter_results
 from app.services.document_kind import UploadedDocument
 from app.services.differ import compare_documents
-from app.services.extractor import SectionWindow, extract_document, extract_page_infos, slice_document_projection
+from app.services.extractor import DocumentProjection, SectionWindow, extract_document, extract_page_infos, slice_document_projection
 from app.services.markdown_bundle import build_markdown_bundle
 
 
@@ -261,27 +261,65 @@ class JobStore:
         chapter_results: list[tuple[ChapterExecutionPair, DiffResult]] = []
         total_pairs = len(job.chapter_pairs)
 
+        def empty_projection_like(document: DocumentProjection) -> DocumentProjection:
+            return DocumentProjection(
+                pdf_path=document.pdf_path,
+                document_kind=document.document_kind,
+                pages=[],
+                chars=[],
+                words=[],
+                tables=[],
+                text_segments=[],
+                raw_text="",
+                normalized_text="",
+                aligned_text="",
+                aligned_to_raw=[],
+                review_html=None,
+            )
+
+        def empty_chapter_result() -> DiffResult:
+            return DiffResult(
+                document_kind=job.document_kind,
+                pages_left=[],
+                pages_right=[],
+                summary=DiffSummary(),
+                anchors=[],
+                chapters=[],
+            )
+
         for index, pair in enumerate(job.chapter_pairs, start=1):
             job.status = "extracting"
             job.stage = f"extracting chapter {index}/{total_pairs}"
             job.progress = 10 + int(((index - 1) / total_pairs) * 70)
-            source_window = slice_document_projection(
-                source_projection,
-                SectionWindow(
-                    start_page=pair.source_start_page,
-                    end_page=pair.source_end_page,
-                    start_y=pair.source_start_y,
-                    end_y=pair.source_end_y,
-                ),
+            if pair.status == "container":
+                chapter_results.append((pair, empty_chapter_result()))
+                continue
+
+            source_window = (
+                slice_document_projection(
+                    source_projection,
+                    SectionWindow(
+                        start_page=pair.source_start_page,
+                        end_page=pair.source_end_page,
+                        start_y=pair.source_start_y,
+                        end_y=pair.source_end_y,
+                    ),
+                )
+                if pair.source_start_page is not None and pair.source_end_page is not None
+                else empty_projection_like(source_projection)
             )
-            modified_window = slice_document_projection(
-                modified_projection,
-                SectionWindow(
-                    start_page=pair.modified_start_page,
-                    end_page=pair.modified_end_page,
-                    start_y=pair.modified_start_y,
-                    end_y=pair.modified_end_y,
-                ),
+            modified_window = (
+                slice_document_projection(
+                    modified_projection,
+                    SectionWindow(
+                        start_page=pair.modified_start_page,
+                        end_page=pair.modified_end_page,
+                        start_y=pair.modified_start_y,
+                        end_y=pair.modified_end_y,
+                    ),
+                )
+                if pair.modified_start_page is not None and pair.modified_end_page is not None
+                else empty_projection_like(modified_projection)
             )
 
             job.status = "aligning"
